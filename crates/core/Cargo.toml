@@ -1,0 +1,9 @@
+[package]
+name = "agenttidy-core"
+description = "AgentTidy core domain models"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

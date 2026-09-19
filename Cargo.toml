@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/application",
+    "crates/infrastructure",
+    "crates/provider-api",
+    "crates/test-support",
+    "providers/workbuddy",
+    "providers/claude-code",
+    "providers/codex",
+    "apps/cli",
+    "apps/desktop/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/agenttidy/agenttidy"
+
+[workspace.dependencies]
+agenttidy-core = { path = "crates/core" }
+agenttidy-application = { path = "crates/application" }
+agenttidy-infrastructure = { path = "crates/infrastructure" }
+agenttidy-provider-api = { path = "crates/provider-api" }
+agenttidy-test-support = { path = "crates/test-support" }
+agenttidy-workbuddy = { path = "providers/workbuddy" }
+agenttidy-claude-code = { path = "providers/claude-code" }
+agenttidy-codex = { path = "providers/codex" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = true
+strip = true

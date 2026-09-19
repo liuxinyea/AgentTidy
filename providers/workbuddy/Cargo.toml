@@ -1,0 +1,10 @@
+[package]
+name = "agenttidy-workbuddy"
+description = "WorkBuddy provider adapter for AgentTidy"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agenttidy-provider-api = { workspace = true }

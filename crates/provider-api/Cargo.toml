@@ -1,0 +1,11 @@
+[package]
+name = "agenttidy-provider-api"
+description = "Provider adapter contracts for AgentTidy"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agenttidy-core = { workspace = true }
+serde = { workspace = true }

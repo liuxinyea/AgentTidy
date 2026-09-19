@@ -1,0 +1,15 @@
+{
+  "name": "agenttidy",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "packageManager": "pnpm@10.0.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev:desktop": "pnpm --filter @agenttidy/desktop dev",
+    "build:desktop": "pnpm --filter @agenttidy/desktop build",
+    "tauri": "pnpm --filter @agenttidy/desktop tauri"
+  }
+}

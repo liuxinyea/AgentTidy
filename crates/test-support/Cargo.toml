@@ -1,0 +1,9 @@
+[package]
+name = "agenttidy-test-support"
+description = "Shared test utilities and fixture loaders for AgentTidy"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

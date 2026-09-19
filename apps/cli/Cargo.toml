@@ -1,0 +1,15 @@
+[package]
+name = "agenttidy-cli"
+description = "AgentTidy command-line interface"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "agenttidy"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }

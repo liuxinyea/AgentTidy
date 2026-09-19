@@ -1,0 +1,11 @@
+[package]
+name = "agenttidy-application"
+description = "Application API shared by GUI and CLI"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agenttidy-core = { workspace = true }
+agenttidy-provider-api = { workspace = true }

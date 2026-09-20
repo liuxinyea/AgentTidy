@@ -76,7 +76,6 @@ impl AgentSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capability::CapabilityTopic;
     use crate::installation::{InstallationStatus, Platform};
     use crate::provider::ProviderId;
     use crate::resource::{ManagedBy, Ownership, Resource, ResourceKind, ResourceLocator};
@@ -86,7 +85,7 @@ mod tests {
     fn fixture_snapshot() -> AgentSnapshot {
         let provider = ProviderId::new(ProviderId::CLAUDE_CODE);
         let installation = AgentInstallation {
-            id: "claude-code:default".into(),
+            id: "claude-code:cli".into(),
             provider: provider.clone(),
             platform: Platform::Macos,
             version: Some("2.1.235".into()),
@@ -107,7 +106,7 @@ mod tests {
             metadata: serde_json::Map::new(),
         };
         let resource = Resource {
-            id: crate::resource::ResourceId::new("claude-code:default:session:02e8fad4"),
+            id: crate::resource::ResourceId::new("claude-code:cli:session:02e8fad4"),
             provider,
             installation_id: installation.id.clone(),
             kind: ResourceKind::Session,
@@ -147,7 +146,7 @@ mod tests {
         // total (§8 no-fake-precision; merge follows weakest contributor).
         let mut snap = fixture_snapshot();
         snap.resources.push(Resource {
-            id: crate::resource::ResourceId::new("claude-code:default:session:unmeasured"),
+            id: crate::resource::ResourceId::new("claude-code:cli:session:unmeasured"),
             size: SizeInfo::unknown(),
             ..snap.resources[0].clone()
         });
@@ -172,11 +171,5 @@ mod tests {
         let json = serde_json::to_string_pretty(&snap).unwrap();
         let back: AgentSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back, snap);
-    }
-
-    #[test]
-    fn unused_topic_import_is_for_docs() {
-        // CapabilityTopic is referenced by docs elsewhere; keep import used.
-        let _ = CapabilityTopic::Sessions;
     }
 }

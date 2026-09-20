@@ -40,6 +40,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   types but drop all message content, paths, identity files, trace IDs
   and usage payloads. UUIDs are kept because they are schema-relevant
   for session-link tests.
+
+### Fixed (Phase 1 review, installation-model alignment)
+
+- `SessionId` doc corrected: uniqueness is per *installation*, not per
+  provider — the same id may legitimately appear in both `claude-code`
+  installations (Desktop mirrors CLI transcripts); dedup by
+  `(provider, session id)` is the application layer's job.
+- `AgentInstallation.id` now documents the `<provider>:<role>` naming
+  convention; test fixtures renamed `claude-code:default` →
+  `claude-code:cli` to match it (5 occurrences).
+- Removed unused `Session::CAPABILITY_TOPIC` const and the
+  keep-import-alive `unused_topic_import_is_for_docs` test.
 - Provider investigation update (Windows 10, 2026-09-20): verified state roots
   for all three in-scope providers on Windows 10. New
   `docs/providers/claude-desktop.md` documents Claude Desktop

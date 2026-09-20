@@ -5,17 +5,21 @@
 //! groups space by session, and cleanup plans ultimately operate on
 //! session-scoped resources.
 
-use crate::capability::CapabilityTopic;
 use crate::provider::ProviderId;
 use crate::resource::ResourceRef;
 use crate::size::SizeInfo;
 use serde::{Deserialize, Serialize};
 
-/// Stable identifier of one session within a provider.
+/// Stable identifier of one session within an installation.
 ///
 /// Newtype (not bare `String`) so provider-native id formats (Claude Code
 /// UUIDv4, Codex UUIDv7, WorkBuddy UUIDv4) never leak as free strings.
-/// Uniqueness is only meaningful *within* one provider.
+/// Uniqueness is only meaningful *within* one installation: the same id
+/// may legitimately appear in two installations of one provider (Claude
+/// Desktop mirrors the CLI's transcripts, see
+/// `docs/providers/claude-desktop.md`) and denotes the *same* logical
+/// session — the application layer dedups by `(provider, session id)`
+/// when merging installation snapshots.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
 
@@ -111,27 +115,26 @@ pub struct Session {
 }
 
 impl Session {
-    /// Shorthand for the `CapabilityTopic::Sessions` topic constant —
-    /// capability checks use this when deciding how to present a session.
-    ///
-    /// Whether an agent *has* an archive concept at all is likewise a
-    /// provider-reported fact: providers that support archives report
-    /// `CapabilityTopic::Archive`, and only they may emit
-    /// `SessionLifecycle::Archived` (doc §9.3 rule). Core deliberately
-    /// keeps no hardcoded provider list here — that would be a second
-    /// source of truth that can drift from the capability reports.
-    pub const CAPABILITY_TOPIC: CapabilityTopic = CapabilityTopic::Sessions;
+    // No `supports_archive` here on purpose: whether an agent has an
+    // archive concept is a provider-reported capability
+    // (`CapabilityTopic::Archive`, §9.3 rule), and only providers that
+    // report it may emit `SessionLifecycle::Archived`. Core keeps no
+    // hardcoded provider list — that would be a second source of truth
+    // that can drift from the capability reports.
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Referenced for the archive-support test only — the main module keeps
+    // no capability imports (archive support is provider-reported, §9.3).
+    use crate::capability::CapabilityTopic;
 
     fn session(lifecycle: SessionLifecycle) -> Session {
         Session {
             id: SessionId::new("02e8fad4-0531-4a27-b5bb-6fa12019561c"),
             provider: ProviderId::new(ProviderId::CLAUDE_CODE),
-            installation_id: "claude-code:default".into(),
+            installation_id: "claude-code:cli".into(),
             title: None,
             project: Some(ProjectRef::from_cwd("/Users/x/proj")),
             created_at: Some(1789000000000),

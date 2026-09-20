@@ -35,6 +35,12 @@ pub enum InstallationStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentInstallation {
     /// Unique id for this installation (provider-scoped, stable per scan).
+    ///
+    /// Convention: `<provider>:<role>` — `claude-code:cli` and
+    /// `claude-code:desktop` are two installations with different data
+    /// roots (see `crate::provider::ProviderId` constant docs and
+    /// `docs/providers/claude-desktop.md`); `codex:default` and
+    /// `workbuddy:default` are single installations.
     pub id: String,
     /// Which agent product this is.
     pub provider: ProviderId,
@@ -65,7 +71,7 @@ mod tests {
 
     fn install(status: InstallationStatus) -> AgentInstallation {
         AgentInstallation {
-            id: "claude-code:default".into(),
+            id: "claude-code:cli".into(),
             provider: ProviderId::new(ProviderId::CLAUDE_CODE),
             platform: Platform::Macos,
             version: Some("2.1.235".into()),

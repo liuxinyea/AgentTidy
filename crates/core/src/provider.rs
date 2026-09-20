@@ -21,11 +21,28 @@ use std::fmt;
 pub struct ProviderId(pub String);
 
 impl ProviderId {
-    /// Anthropic Claude Code (CLI + desktop).
+    /// Anthropic Claude Code.
+    ///
+    /// One `ProviderId` for the CLI and its Desktop counterpart
+    /// (`docs/providers/claude-desktop.md`). They share session identity but
+    /// write to different roots, so they are exposed as two
+    /// `AgentInstallation`s under the same id:
+    /// - `claude-code:cli` — `%USERPROFILE%\.claude\`
+    /// - `claude-code:desktop` — `%LOCALAPPDATA%\Claude-3p\` (out-of-scope
+    ///   for v0.1 cleanup but discovered during detect; reported as a
+    ///   second read-only installation rather than its own provider, so the
+    ///   closed `ProviderId` set stays intact).
     pub const CLAUDE_CODE: &str = "claude-code";
-    /// OpenAI Codex (CLI + desktop).
+    /// OpenAI Codex.
+    ///
+    /// CLI and Desktop share the same state root (`~/.codex/`); they are one
+    /// `AgentInstallation` whose `data_roots` include both the state root
+    /// and the default workspace root (`~/Documents/Codex/`). Per-session
+    /// originator metadata (`state_5.sqlite.threads.thread_source` /
+    /// `originator`) is what tells CLI vs Desktop sessions apart inside the
+    /// Provider.
     pub const CODEX: &str = "codex";
-    /// WorkBuddy desktop app.
+    /// WorkBuddy desktop app (no separate CLI).
     pub const WORKBUDDY: &str = "workbuddy";
 
     /// Construct from a known-good literal (e.g. a constant above).

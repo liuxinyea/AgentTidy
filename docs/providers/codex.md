@@ -46,7 +46,7 @@ Codex Desktop / Codex app creates **default per-day workspace dirs under `~/Docu
 - Scan requirement: detection must cover `~/Documents/Codex/` in addition to `~/.codex/`, and correlate via `threads.cwd` to attribute space to sessions.
 - Windows equivalent (unverified, assumed `%USERPROFILE%\Documents\Codex\`).
 
-Related: `~/Documents/ChatGPT/` (153 MB in sample) is the analogous default workspace for the ChatGPT desktop app (contains full user projects with `.git`, `node_modules` — pure user data, Blocked). Not a v0.1 target provider, but detection should recognize it to avoid misclassifying it as an unknown agent dir.
+Related: `~/Documents/ChatGPT/` (153 MB in sample) is the analogous default workspace for the ChatGPT desktop app (contains full user projects with `.git`, `node_modules` — pure user data, Blocked). Not a v0.1 target provider, and v0.1 never scans it (detection only reads the three known providers' roots). If a future generic workspace-scan mode arrives, it will first need a "known non-target app" concept — the closed `ProviderId` set has no representation for it, and leaving the dir as an unknown structure would be exactly the misclassification to avoid. Deferred until then.
 
 ## Version discovery mechanism
 

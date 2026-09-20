@@ -9,10 +9,11 @@
 | Platform | CLI version | Sample date | Notes |
 |---|---|---|---|
 | macOS (arm64, Darwin 25.6.0) | 2.1.235 | 2026-09-19 | `claude --version`; sessions record `version` per line |
+| Windows 10 Home China (64-bit) | 2.1.218 | 2026-09-20 | `claude --version`; only 2 transcripts in `%USERPROFILE%\.claude\projects\` |
 
 ## Installation & data locations (macOS)
 
-Root: `~/.claude/` (all state under one directory; no `~/Library/Application Support` involvement observed). Unlike WorkBuddy/Codex Desktop, **no default workspace directory is created outside the state root** — sessions run directly in the user's chosen cwd; there is nothing additional to scan under `~/Documents` or similar. Install locations (for detection only, never clean): CLI at `~/.local/bin/claude` (symlink → `~/.local/share/claude/versions/<ver>`), desktop app at `/Applications/Claude.app`.
+Root: `~/.claude/` (all state under one directory; no `~/Library/Application Support` involvement observed). Unlike WorkBuddy/Codex Desktop, **no default workspace directory is created outside the state root** — sessions run directly in the user's chosen cwd; there is nothing additional to scan under `~/Documents` or similar. Install locations (for detection only, never clean): CLI at `~/.local/bin/claude` (symlink → `~/.local/share/claude/versions/<ver>`), desktop app at `/Applications/Claude.app`. Note: on macOS the Claude Desktop equivalent of `%LOCALAPPDATA%\Claude-3p\` (Windows) is unverified — Phase 0 macOS sample did not collect it.
 
 | Path | Role | Size (sample) | Cleanup class |
 |---|---|---|---|
@@ -105,8 +106,59 @@ Key edges: session → its side dir (delete together); project → memory (do no
 - If `projects/<slug>/<uuid>.jsonl` exists but lines lack `sessionId` → Unknown → Blocked.
 - Missing `history.jsonl` or `stats-cache.json` degrades stats only, not session listing.
 
+## Installation & data locations (Windows)
+
+**Verified**: Windows sample collected 2026-09-20 (Claude Code 2.1.218 CLI).
+
+Root: `%USERPROFILE%\.claude\` (e.g. `C:\Users\18712\.claude\`). Unlike WorkBuddy/Codex Desktop, **no default workspace directory is created outside the state root** — sessions run directly in the user's chosen cwd; there is nothing additional to scan under `%USERPROFILE%\Documents` or similar. Install locations (for detection only, never clean): CLI at `%USERPROFILE%\.local\bin\claude` (symlink → `%USERPROFILE%\.local\share\claude\versions\<ver>`), desktop app elsewhere. **Claude Desktop is a second `claude-code` installation** — see `claude-desktop.md`; v0.1 detects it as `claude-code:desktop` but treats it as read-only.
+
+| Path | Role | Size (sample) | Cleanup class |
+|---|---|---|---|
+| `projects/<cwd-slug>/<session-id>.jsonl` | Session transcripts (JSONL, append-only) | 0.36 MB / 2 files | Per-session |
+| `projects/<cwd-slug>/<session-id>/` | Per-session side dir (`subagents/`, `auto-mode-classifier-error.txt`) | — | Per-session |
+| `projects/<cwd-slug>/memory/` | Per-project agent memory | empty in sample | Shared per project |
+| `file-history/<hash>@v<n>/` | File edit snapshots (content-addressed) | — | Shared / review |
+| `shell-snapshots/` | Shell env snapshot per shell PID | 0 MB | Cache-like |
+| `session-env/` | Per-session env records (often empty) | 0 MB | Per-session |
+| `plans/`, `tasks/` | Plan & task outputs | — | Per-session-ish |
+| `history.jsonl` | Global prompt history (one line per prompt, has `project` field) | — | Shared |
+| `stats-cache.json` | Cached daily usage stats (`dailyActivity[]` with `sessionCount`) | — | Derivable cache |
+| `backups/`, `cache/`, `paste-cache/`, `debug/`, `downloads/`, `ide/`, `daemon/`, `jobs/`, `skills/`, `plugins/`, `agents/`, `todo*` | App-managed caches / state | — | Not yet classified |
+| `.last-cleanup`, `.last-update-result.json`, `config.json`, `settings.json` | Markers / config | — | Never clean |
+
+**Windows-specific notes**:
+- Path separator: `\` (backslash) instead of `/` (forward slash) on macOS.
+- Slug mapping: `/` → `-` (same as macOS), but Windows paths use `\` as separator. Example: `F:\Work\AgentTidy` → `F--Work-AgentTidy`.
+- Cross-drive cwds: possible (e.g. `D:\Projects\...`), but not observed in sample.
+- No default workspace directory outside state root (confirmed).
+- Case sensitivity: Windows is case-insensitive; compare paths case-insensitively.
+
+## Detected installations on Windows
+
+`claude-code` may install twice on the same machine — the **CLI** install and the **Desktop (cowork)** install. They share session identity and on-disk schema (the Desktop's `local-agent-mode-sessions/.../.claude/projects/` is a literal mirror of the CLI's `%USERPROFILE%\.claude\projects/`), but they write to different roots and need separate `AgentInstallation`s. Provider adapter must enumerate both and emit the same `ProviderId` for each.
+
+| Installation id | Data roots | v0.1 capability | Notes |
+|---|---|---|---|
+| `claude-code:cli` | `%USERPROFILE%\.claude\`, `%LOCALAPPDATA%\Claude\`, `%LOCALAPPDATA%\claude-cli-nodejs\`, `%LOCALAPPDATA%\Claude-Data\`, `%PROGRAMDATA%\Claude\` | Supported | This doc |
+| `claude-code:desktop` | `%LOCALAPPDATA%\Claude-3p\` | `ReadOnly` (v0.1) | See `claude-desktop.md`. Bundles Linux VM (~9.6 GB) running the same CLI 2.1.275; data overlaps with CLI |
+
+**Scan locations for `claude-code:cli` on Windows** (deduplicated, case-insensitive):
+
+| Location | Content | Role in app |
+|---|---|---|
+| `%USERPROFILE%\.claude\` | transcripts, caches (this doc) | State root — primary scan target |
+| `%LOCALAPPDATA%\Claude\` | Local AppData (logs) | Logs |
+| `%LOCALAPPDATA%\claude-cli-nodejs\` | Local AppData (cache) | Cache |
+| `%LOCALAPPDATA%\Claude-Data\` | Local AppData | App state |
+| `%PROGRAMDATA%\Claude\` | ProgramData (logs) | Logs |
+
+**Scan locations for `claude-code:desktop` on Windows**: see `claude-desktop.md` (single root `%LOCALAPPDATA%\Claude-3p\`). The adapter reports both installations; **the Application layer deduplicates sessions** by `(cwd-slug, session-uuid)` so a session that Desktop launched and that the CLI kept writing after Desktop quit is counted once, with the union of resources.
+
 ## Open questions (Phase 0 continues)
 
-- [ ] Windows path for `~/.claude` (`%USERPROFILE%\.claude` assumed — verify on real Windows machine).
+- [x] Windows path for `~/.claude` (`%USERPROFILE%\.claude` verified 2026-09-20).
 - [ ] Whether `backups/` is safe to clean (write cadence unknown).
 - [ ] `file-history` retention semantics across Claude Code versions.
+- [x] Claude Desktop installation model: same `ProviderId`, second `AgentInstallation` (`claude-code:desktop`) — confirmed.
+- [ ] Application-layer session dedup: pick the join key (proposed: `(cwd-slug, session-uuid)`) and confirm the more recent copy wins when both installations hold the same transcript.
+- [ ] macOS counterpart of `%LOCALAPPDATA%\Claude-3p\` (likely `~/Library/Application Support/Claude-3p/` — verify).

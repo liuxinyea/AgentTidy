@@ -24,6 +24,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   home, app install), workspaces classify as Blocked/report-only; WorkBuddy
   user-chosen cwds with spaces/CJK verified; per-session sidecar files
   (`<uuid>.meta.json`, `<uuid>.file-rollback.ndjson`) documented.
+- Provider investigation update (Windows 10, 2026-09-20): verified state
+  roots for all three in-scope providers. New
+  `docs/providers/claude-desktop.md` documents Claude Desktop
+  (`%LOCALAPPDATA%\Claude-3p\`, ~10 GB dominated by a Linux VM rootfs) as
+  the **second `claude-code` installation** (not a separate `ProviderId`).
+  `docs/providers/windows-path-matrix.md` records the per-installation
+  path matrix. Codex CLI + Codex Desktop share one state root and are
+  modelled as a single `codex` installation. `docs/providers/phase0-windows-{summary,complete,final}.md`
+  archive the full investigation.
+- Sanitized Phase 0 fixtures (`fixtures/<provider>/config/directory-tree.json`
+  + `fixtures/<provider>/sessions/sample-session.jsonl` for each of
+  `workbuddy`, `claude-code`, `codex`). Directory skeletons are depth-1
+  with zero paths/PII; session JSONLs preserve schema fields and line
+  types but drop all message content, paths, identity files, trace IDs
+  and usage payloads. UUIDs are kept because they are schema-relevant
+  for session-link tests.
+- Provider investigation update (Windows 10, 2026-09-20): verified state roots
+  for all three in-scope providers on Windows 10. New
+  `docs/providers/claude-desktop.md` documents Claude Desktop
+  (`%LOCALAPPDATA%\Claude-3p\`, ~10 GB dominated by a Linux VM rootfs) as
+  the **second `claude-code` installation** (not a separate `ProviderId`).
+  `docs/providers/windows-path-matrix.md` records the per-installation
+  path matrix. Codex CLI + Codex Desktop share one state root
+  (`%USERPROFILE%\.codex\` + `%USERPROFILE%\Documents\Codex\`) and are
+  modelled as a single `codex` installation. `docs/providers/phase0-windows-{summary,complete,final}.md`
+  archive the full investigation.
+- Sanitized Phase 0 fixtures (`fixtures/<provider>/config/directory-tree.json`
+  + `fixtures/<provider>/sessions/sample-session.jsonl` for each of
+  `workbuddy`, `claude-code`, `codex`). Directory skeletons are depth-1 with
+  zero paths/PII; session JSONLs preserve schema fields and line types but
+  drop all message content, paths, identity files, trace IDs and usage
+  payloads. UUIDs are kept because they are schema-relevant for session-link
+  tests.
 
 ### Added (Phase 1: read-only core)
 
@@ -67,3 +100,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/providers/codex.md`: ChatGPT-dir recognition deferred — v0.1 only
   scans known provider roots, and the closed `ProviderId` set has no
   "known non-target app" representation yet.
+
+### Fixed (Phase 1 review, installation-model alignment)
+
+- `SessionId` doc corrected: uniqueness is per *installation*, not per
+  provider — the same id may legitimately appear in both `claude-code`
+  installations (Desktop mirrors CLI transcripts); dedup by
+  `(provider, session id)` is the application layer's job.
+- `AgentInstallation.id` now documents the `<provider>:<role>` naming
+  convention; test fixtures renamed `claude-code:default` →
+  `claude-code:cli` to match it (5 occurrences).
+- Removed unused `Session::CAPABILITY_TOPIC` const and the
+  keep-import-alive `unused_topic_import_is_for_docs` test.
+
+### Added (Phase 2: infrastructure)
+
+`crates/infrastructure` is now live (was a 7-line placeholder). The
+crate exposes provider-neutral platform services with platform code
+confined to `#[cfg]` branches inside its modules (red line #11).
+Everything in Start.md §13.1 is implemented:
+
+- **Path safety** (`paths`): `safe_canonicalize` (verbatim-stripped
+  Windows canonical form), `strip_verbatim` (`\\?\C:\x` ↔ `C:\x`,
+  `\\?\UNC\…` ↔ `\\…`), `normalize_drive_letter` (`c:` → `C:`),
+  `is_within` (component-based containment, strict-descendant,
+  Windows case-insensitive / macOS case-sensitive — the asymmetry is
+  deliberately the conservative direction per §16.1), and
+  `has_reserved_component` (`CON`/`PRN`/… — Windows-only).
+- **Read-only filesystem probing** (`fs_probe`): `walk_tree` over
+  `walkdir` with `follow_links(false)` — symlinks/junctions are
+  returned as `EntryKind::Link` (never followed), Windows cloud
+  reparse-point dirs and Unix special files are `EntryKind::Unknown`
+  (caller fails closed). Each file carries `FileIdentity` (Windows
+  `BY_HANDLE_FILE_INFORMATION` via `CreateFileW` with `FILE_FLAG_OPEN_REPARSE_POINT`;
+  Unix `dev`/`ino`) and `allocated_len` (Windows `GetCompressedFileSizeW`,
+  Unix `st_blocks * 512`). 14 unit tests including a real junction
+  via `mklink /J` and a hard-link dedup assertion.
+- **Size aggregation** (`disk_usage`): `UsageAccumulator` dedupes
+  hard links by identity (§8), reports
+  `hardlink_duplicates_skipped` and `unidentifiable_files`, and drops
+  `allocated_bytes` to `None` on any unmeasured contribution (no
+  fake precision).
+- **Streaming JSONL** (`jsonl`): `open_jsonl`/`JsonlReader` — per-line
+  events (`Item`/`Malformed`/`Fatal`); empty lines and parse errors
+  are surfaced, never abort the stream.
+- **Read-only SQLite** (`sqlite`): `ReadOnlyDb::open` does `mode=ro`
+  URI open and falls back to a **private temp copy** of `db` + `-wal`
+  + `-shm` opened rw on *our* copy when WAL recovery or a busy
+  lock blocks the direct read. `journal_mode` and `quick_check_ok`
+  surface §10.1 inspection facts. URI encoder percent-encodes
+  provider-realistic paths (spaces, CJK).
+- **Process signals** (`processes`): `ProcessSignature`
+  (`exe_names` + `cmdline_substrings`) and `any_process_running`,
+  driven by `sysinfo` 0.30 — deliberately narrow, never a decision
+  (§16.2: one signal among several).
+- **Trash** (`trash`): `move_to_trash` wrapping `trash` crate (Windows
+  Recycle Bin / macOS NSWorkspace). Missing path = `TrashError::NotFound`
+  (fail closed); locked files surface as `TrashError::Platform` for the
+  Phase 6 executor to mark `skipped`.
+
+Tests: 31 in infrastructure (31 pass on Windows). Workspace total:
+55 tests pass. `cargo fmt` and `cargo clippy --workspace --all-targets
+-- -D warnings` clean.
+
+New workspace deps: `walkdir`, `rusqlite` (bundled), `trash`, `sysinfo`,
+`windows-sys` (Win32_Storage_FileSystem, Win32_Foundation, Win32_Security —
+last one gates `CreateFileW`'s `SECURITY_ATTRIBUTES` signature).

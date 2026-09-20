@@ -1,0 +1,29 @@
+{
+  "_doc": "Sanitized Claude Code state-root skeleton (depth=1). Real samples collected on Windows 10 (CLI 2.1.218) and macOS. Only directory names survive; per-session UUIDs and per-cwd slugs are stripped. Layout matches docs/providers/claude-code.md.",
+  "root": "<state-root>",
+  "depth": 1,
+  "entries": [
+    "backups",
+    "cache",
+    "daemon",
+    "downloads",
+    "ide",
+    "jobs",
+    "paste-cache",
+    "plugins",
+    "projects",
+    "session-env",
+    "sessions",
+    "shell-snapshots",
+    "skills",
+    "file-history",
+    "plans",
+    "tasks",
+    "history.jsonl",
+    "stats-cache.json",
+    ".last-cleanup",
+    ".last-update-result.json",
+    "config.json",
+    "settings.json"
+  ]
+}

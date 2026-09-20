@@ -11,6 +11,17 @@
 | macOS (arm64, Darwin 25.6.0) | 0.152.0 | 2026-09-19 | `codex --version`; `version.json` records `latest_version` 0.153.4 |
 | macOS | 0.133.0 – 0.145.0-alpha | via `threads.cli_version` / `session_meta.cli_version` | schema stable across the sampled range |
 
+## Detected installations
+
+Codex ships as both a CLI (`codex-cli`) and a Desktop app. **They share the same state root** — both write to `~/.codex/` (or `%USERPROFILE%\.codex\` on Windows), appending to the same `state_5.sqlite.threads`, the same JSONL rollouts, and the same `logs_2.sqlite`. There is no separate Desktop data root.
+
+Therefore v0.1 exposes Codex as **one** `codex` installation whose `data_roots` are:
+
+- The state root (`~/.codex/` / `%USERPROFILE%\.codex\`) — authoritative for sessions.
+- The default Desktop workspace root (`~/Documents/Codex/` / `%USERPROFILE%\Documents\Codex\`) — created only by Desktop when the user starts a conversation without picking a folder; report-only (Blocked).
+
+Per-session origin (`threads.thread_source`, `threads.originator`, JSONL `session_meta.payload.originator`) is what tells CLI vs Desktop sessions apart inside the Provider; no separate `codex:cli` / `codex:desktop` `AgentInstallation` is needed because there is no separate storage to dedupe.
+
 ## Installation & data locations (macOS)
 
 Root: `~/.codex/`. Unlike Claude Code, Codex keeps **both** JSONL rollouts and several SQLite databases.
@@ -130,10 +141,59 @@ Deleting a rollout file **without** DB consistency breaks: `threads.rollout_path
 - Rollout file present but first line not `session_meta` ⇒ Unknown → Blocked.
 - `archived=1` but file not in `archived_sessions/` (or vice versa) ⇒ inconsistent ⇒ Blocked until reconciled.
 
+## Installation & data locations (Windows)
+
+**Verified**: Windows sample collected 2026-09-20 (codex-cli 0.145.0; sample sessions written by 0.133.0 – 0.145.0 line).
+
+Root: `%USERPROFILE%\.codex\` (e.g. `C:\Users\18712\.codex\`). Unlike Claude Code, Codex keeps **both** JSONL rollouts and several SQLite databases.
+
+| Path | Role | Size (sample) | Cleanup class |
+|---|---|---|---|
+| `sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` | Session rollouts (append-only JSONL) | 208.64 MB / 19 files | Per-session |
+| `archived_sessions/rollout-*.jsonl` | User-archived rollouts (flat) | — | Per-session (archived) |
+| `state_5.sqlite` (+ `-wal`/`-shm`) | **Thread index**: `threads`, `projects`, `thread_attachments`, … | 0.84 MB | Index — never delete rows directly |
+| `thread_history_1.sqlite` (+wal) | Projection of rollout content (`thread_items`, `thread_turns`) | 135.18 MB | Index |
+| `logs_2.sqlite` (+wal) | Append-only runtime logs (`logs` table) | 45.24 MB | Log cache class |
+| `queue_1.sqlite`, `memories_1.sqlite`, `goals_1.sqlite` | Queue / memory / goals features | ≤0.1 MB each | Feature state |
+| `session_index.jsonl` | UI thread list: `{id, thread_name, updated_at}` | — | Derivable index |
+| `attachments/<uuid>/` | Per-thread attachment blobs | 0.08 MB | Per-thread |
+| `cache/`, `.tmp/`, `shell_snapshots/`, `thread-writer-locks/`, `ipc/` | Caches / locks | 26.95 MB | Cache class |
+| `config.toml`, `auth.json`, `installation_id`, `version.json`, `hooks.json`, `rules/` | Config / credentials | — | Never clean |
+| `..codex-global-state.json.tmp-*` (14 files) | **Orphaned temp write leftovers** in `%USERPROFILE%\.codex\` root | ~1 MB | Garbage (see risks) |
+| `models_cache.json`, `cc-switch-model-catalog.json` | Model catalog caches | — | Cache |
+| `archived_sessions/` sibling dirs (`agents/`, `automations/`, `browser/`, `computer-use/`, `generated_images/`, `goals_1.sqlite`…) | Feature data | — | Not yet classified |
+
+### Default workspace directories (Windows)
+
+Codex Desktop / Codex app creates **default per-day workspace dirs under `%USERPROFILE%\Documents\Codex\`** when the user starts a conversation without picking a folder:
+
+```
+%USERPROFILE%\Documents\Codex\YYYY-MM-DD\<chat-name>\        # e.g. 2026-09-10/new-chat/
+├── work/                                       # agent working files
+└── outputs/                                    # produced artifacts
+```
+
+- Verified in sample: 4 day-dirs (2026-08-03 → 2026-09-13), nested chat dirs including URL-derived slugs; corresponding threads exist in `state_5.sqlite` with these cwds.
+- These hold **user-visible artifacts** (agent-written files), not session transcripts. They are user data — AgentTidy may *report* them (size, owning thread) but must treat them as **Blocked** for cleanup by default.
+- Scan requirement: detection must cover `%USERPROFILE%\Documents\Codex\` in addition to `%USERPROFILE%\.codex\`, and correlate via `threads.cwd` to attribute space to sessions.
+
+**Windows-specific notes**:
+- Path separator: `\` (backslash) instead of `/` (forward slash) on macOS.
+- Cross-drive cwds: possible (e.g. `D:\Projects\...`), but not observed in sample.
+- Default workspace root: `%USERPROFILE%\Documents\Codex\` (confirmed).
+- Case sensitivity: Windows is case-insensitive; compare paths case-insensitively.
+
+**Scan locations for Codex on Windows** (deduplicated, case-insensitive):
+
+| Location | Content | Role in app |
+|---|---|---|
+| `%USERPROFILE%\.codex\` | transcripts, DBs, caches (this doc) | State root — primary scan target |
+| `%USERPROFILE%\Documents\Codex\` | default scratch workspaces + named workspaces | Workspace root — report-only (Blocked) |
+
 ## Open questions (Phase 0 continues)
 
-- [ ] Windows path (`%USERPROFILE%\.codex` assumed — verify; also whether the default workspace is `%USERPROFILE%\Documents\Codex\` on Windows).
+- [x] Windows path (`%USERPROFILE%\.codex` verified 2026-09-20; also whether the default workspace is `%USERPROFILE%\Documents\Codex\` on Windows — verified).
 - [ ] Does Codex expose a native "delete thread" that also fixes DB? (protocol investigation)
 - [ ] `logs_2.sqlite` rotation/retention policy (does Codex ever prune it?).
 - [ ] Behavior of `attachments/` when its thread is archived (moved or left?).
-- [ ] When are `~/Documents/Codex/YYYY-MM-DD/<chat>/` dirs created vs a user-picked cwd? (default-workspace trigger conditions)
+- [ ] When are `%USERPROFILE%\Documents\Codex\YYYY-MM-DD\<chat>\` dirs created vs a user-picked cwd? (default-workspace trigger conditions)

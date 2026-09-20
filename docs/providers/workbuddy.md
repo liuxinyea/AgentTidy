@@ -161,11 +161,65 @@ Deleting a transcript while leaving `sessions` row (or vice versa) creates dangl
 - Transcript first line not a `message` with `sessionId` ⇒ Unknown → Blocked.
 - `last-launch.json` version older than min-supported ⇒ warn, degrade to list-only.
 
+## Installation & data locations (Windows)
+
+**Verified**: Windows sample collected 2026-09-20 (WorkBuddy 5.5.6, build 5f96929).
+
+Root: `%USERPROFILE%\.workbuddy\` (e.g. `C:\Users\18712\.workbuddy\`). App installed elsewhere; bundled CLI `workbuddy` in PATH. **Additional scan locations beyond the state root**: `%USERPROFILE%\WorkBuddy\` (default workspace root).
+
+| Path | Role | Size (sample) | Cleanup class |
+|---|---|---|---|
+| `workbuddy.db` (+wal/shm, Drizzle migrations) | **Session index DB** | 0.18 MB | Index — never delete rows |
+| `.workbuddy-sqlite-migrations/*.sql` | Applied migration SQL files | — | Never clean |
+| `projects/<cwd-slug>/<uuid>.jsonl` (+ `<uuid>/tool-results/`) | Session transcripts (JSONL) + per-session tool results | 45.73 MB / 44 files | Per-session |
+| `logs/YYYY-MM-DD/*.log`, `logs/<hash>.log` | Per-day app logs | 108.01 MB / 143 files | Log class |
+| `traces/<id>/` | Per-run traces | 0.78 MB | Log/trace class |
+| `binaries/node`, `binaries/python` | Bundled runtimes | 712.68 MB | Program files — never clean |
+| `app/` | Electron app data (cache, session, crashpad, `sessions.json`) | 63.09 MB | App state |
+| `plugins/`, `connectors-marketplace/`, `appearance-resources/`, `buddy-skill-store/` | Installed extensions | — | Program-ish files |
+| `blobs/` (sharded `00`..`ff`) | Content-addressed blobs | 14.71 MB | Shared |
+| `shell-snapshots/` | Shell env snapshots | 5.83 MB | Cache class |
+| `clipboard-images/` | Pasted images | 4.85 MB | Per-use |
+| `file-history/<uuid>/` | File snapshots (`<hash>@v<n>`) | 3.08 MB | Shared / review |
+| `audit-log/YYYY-MM-DD.jsonl` | Append-only audit trail | — | Never clean (compliance) |
+| `changes-index/`, `changes-detail/`, `file-tree-manifests/`, `artifact-index/` | Derived indices | — | Derivable cache |
+| `edge-sync-mapping-v{1..4}.db` (+wal/shm) | Edge sync mappings — **four generations coexist**, v1–v3 stale | ~0 MB | Old generations = stale |
+| `db-backups/`, `automation-backups/` | Backups | — | Backup class |
+| `workspace/`, `storage/`, `security/`, `credentials/`, `memory/` | Identity / user data | — | Never clean |
+| `MEMORY.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `BOOTSTRAP.md` | Persona/identity files | — | Never clean |
+| `models.json` | User model configs — **contains API keys in plaintext** | — | Never clean / never log |
+| `usage-log.json`, `user-state.json`, `settings.json`, `last-launch.json` | App state | — | Never clean |
+
+**Windows-specific notes**:
+- Path separator: `\` (backslash) instead of `/` (forward slash) on macOS.
+- Slug mapping: `/` → `-` (same as macOS), but Windows paths use `\` as separator. Example: `C:\Users\18712\WorkBuddy\2026-06-25-22-33-03` → `c-Users-18712-WorkBuddy-2026-06-25-22-33-03`.
+- Cross-drive cwds: possible (e.g. `D:\Projects\...`), but not observed in sample.
+- Default workspace root: `%USERPROFILE%\WorkBuddy\` (confirmed).
+- Case sensitivity: Windows is case-insensitive; compare paths case-insensitively.
+
+**Default workspace directories & nested agent state (Windows)**:
+
+| Location | Content | Role in app |
+|---|---|---|
+| `%USERPROFILE%\.workbuddy\` | transcripts, DBs, caches (this doc) | State root — primary scan target |
+| `%USERPROFILE%\WorkBuddy\` | default scratch workspaces + named workspaces | Workspace root — report-only (Blocked) |
+| `%USERPROFILE%\WorkBuddy\.workbuddy\` | workspace-scoped agent memory/automation notes | Hidden agent state inside user-visible tree |
+
+**Scan locations for WorkBuddy on Windows** (deduplicated, case-insensitive):
+
+| Location | Content | Role in app |
+|---|---|---|
+| `%USERPROFILE%\.workbuddy\` | transcripts, DBs, caches (this doc) | State root — primary scan target |
+| `%USERPROFILE%\WorkBuddy\` | default scratch workspaces + named workspaces | Workspace root — report-only (Blocked) |
+| `%USERPROFILE%\WorkBuddy\.workbuddy\` | workspace-scoped agent memory/automation notes | Hidden agent state inside user-visible tree |
+| `%APPDATA%\WorkBuddy\` | Roaming AppData (settings, etc.) | App state |
+| `%LOCALAPPDATA%\WorkBuddy\` | Local AppData (logs) | Logs |
+
 ## Open questions (Phase 0 continues)
 
-- [ ] Windows path (`%USERPROFILE%\.workbuddy` assumed — verify; also `\`-separator slug mapping with cross-drive cwds on Windows, and the Windows default workspace root — `%USERPROFILE%\WorkBuddy\`?).
+- [x] Windows path (`%USERPROFILE%\.workbuddy` verified 2026-09-20; also `\`-separator slug mapping with cross-drive cwds on Windows, and the Windows default workspace root — `%USERPROFILE%\WorkBuddy\` verified).
 - [ ] Does WorkBuddy have a native "empty trash" that also removes transcripts? (worth investigating before we clean orphans)
 - [ ] `traces/` and `logs/` retention knobs in-app?
 - [ ] Blob GC: are `blobs/` entries ever unreferenced? Needs write-path study.
 - [ ] Confirm the full set of per-session sidecar filename patterns (`<uuid>.meta.json`, `<uuid>.file-rollback.ndjson` observed — are there more?).
-- [ ] Is the default workspace root configurable in-app (registry/setting)? If so, discovery must read the config, not assume `~/WorkBuddy/`.
+- [ ] Is the default workspace root configurable in-app (registry/setting)? If so, discovery must read the config, not assume `%USERPROFILE%\WorkBuddy\`.

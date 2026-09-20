@@ -1,0 +1,4 @@
+﻿{"id":"6f70288c-d631-4810-aa12-824be3d13d7c","timestamp":1782397989538,"type":"message","sessionId":"d493ed8f-0147-4c01-89df-b9da4b956532","cwd":"<cwd-slug>","role":"user"}
+{"id":"3534c6b3-c208-4b80-a085-72faf3a19b45","timestamp":1782397989551,"type":"file-history-snapshot","isSnapshotUpdate":false,"cwd":"<cwd-slug>"}
+{"id":"d94a02b2-e4d1-4829-aa34-de7ef49570cd","parentId":"6f70288c-d631-4810-aa12-824be3d13d7c","timestamp":1782398023529,"type":"reasoning","sessionId":"d493ed8f-0147-4c01-89df-b9da4b956532","cwd":"<cwd-slug>"}
+{"id":"c5b5fe7e-1863-41f1-b7b5-341eed33e1b6","parentId":"d94a02b2-e4d1-4829-aa34-de7ef49570cd","timestamp":1782398023543,"type":"message","sessionId":"d493ed8f-0147-4c01-89df-b9da4b956532","cwd":"<cwd-slug>","role":"assistant"}

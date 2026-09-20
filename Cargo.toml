@@ -38,6 +38,26 @@ anyhow = "1"
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
+# Phase 2 infrastructure deps:
+# walkdir: read-only directory enumeration (follow_links=false is the default,
+# which is what §16.1 link-boundary enforcement relies on).
+walkdir = "2"
+# rusqlite (bundled): read-only SQLite access (§13.1); bundled so the
+# build does not depend on a system libsqlite3 being present.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# trash: platform-native move-to-trash (Windows Shell Recycle Bin /
+# macOS NSWorkspace) — §3.4 "trash first" default.
+trash = "5"
+# sysinfo: process-presence signals (§16.2 — one signal, not a decision).
+sysinfo = "0.30"
+# windows-sys: Win32 calls with no std equivalent (file identity via
+# BY_HANDLE_FILE_INFORMATION, allocated size via GetCompressedFileSizeW).
+# Win32_Security gates CreateFileW's signature (SECURITY_ATTRIBUTES).
+windows-sys = { version = "0.59", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_Security",
+] }
 
 [profile.release]
 lto = true

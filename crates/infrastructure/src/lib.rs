@@ -1,8 +1,25 @@
-//! Platform infrastructure (design doc `Start.md` §13.1).
+//! Platform infrastructure (design doc `Start.md` §13.1, Phase 2).
 //!
-//! Exposes platform capabilities behind unified interfaces
-//! (`PlatformServices`: paths, trash, processes, filesystem), implemented
-//! separately for macOS and Windows. Platform differences must never leak
-//! out of this crate (and provider path-discovery logic).
+//! Exposes the platform capabilities behind unified, provider-neutral
+//! functions — paths, filesystem probing, disk usage, JSONL, read-only
+//! SQLite, process signals and trash. Platform differences (Win32
+//! calls, Unix stat semantics, case-sensitivity rules) are confined to
+//! `#[cfg]` branches inside these modules; nothing platform-specific
+//! leaks out of this crate (red line #11), and no business logic lives
+//! here (providers describe facts; policy decides — §10).
 //!
-//! To be implemented in Phase 2.
+//! Usage map (by design-doc section):
+//! - §16.1 path safety — [`paths`]
+//! - §8 space accounting inputs — [`fs_probe`], [`disk_usage`]
+//! - §2.1/§18.1 transcript reading — [`jsonl`]
+//! - §13.1 read-only SQLite — [`sqlite`]
+//! - §16.2 process signal — [`processes`]
+//! - §3.4 trash-first disposal — [`trash`]
+
+pub mod disk_usage;
+pub mod fs_probe;
+pub mod jsonl;
+pub mod paths;
+pub mod processes;
+pub mod sqlite;
+pub mod trash;

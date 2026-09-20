@@ -52,23 +52,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `claude-code:cli` to match it (5 occurrences).
 - Removed unused `Session::CAPABILITY_TOPIC` const and the
   keep-import-alive `unused_topic_import_is_for_docs` test.
-- Provider investigation update (Windows 10, 2026-09-20): verified state roots
-  for all three in-scope providers on Windows 10. New
-  `docs/providers/claude-desktop.md` documents Claude Desktop
-  (`%LOCALAPPDATA%\Claude-3p\`, ~10 GB dominated by a Linux VM rootfs) as
-  the **second `claude-code` installation** (not a separate `ProviderId`).
-  `docs/providers/windows-path-matrix.md` records the per-installation
-  path matrix. Codex CLI + Codex Desktop share one state root
-  (`%USERPROFILE%\.codex\` + `%USERPROFILE%\Documents\Codex\`) and are
-  modelled as a single `codex` installation. `docs/providers/phase0-windows-{summary,complete,final}.md`
-  archive the full investigation.
-- Sanitized Phase 0 fixtures (`fixtures/<provider>/config/directory-tree.json`
-  + `fixtures/<provider>/sessions/sample-session.jsonl` for each of
-  `workbuddy`, `claude-code`, `codex`). Directory skeletons are depth-1 with
-  zero paths/PII; session JSONLs preserve schema fields and line types but
-  drop all message content, paths, identity files, trace IDs and usage
-  payloads. UUIDs are kept because they are schema-relevant for session-link
-  tests.
 
 ### Added (Phase 1: read-only core)
 
@@ -113,18 +96,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scans known provider roots, and the closed `ProviderId` set has no
   "known non-target app" representation yet.
 
-### Fixed (Phase 1 review, installation-model alignment)
-
-- `SessionId` doc corrected: uniqueness is per *installation*, not per
-  provider — the same id may legitimately appear in both `claude-code`
-  installations (Desktop mirrors CLI transcripts); dedup by
-  `(provider, session id)` is the application layer's job.
-- `AgentInstallation.id` now documents the `<provider>:<role>` naming
-  convention; test fixtures renamed `claude-code:default` →
-  `claude-code:cli` to match it (5 occurrences).
-- Removed unused `Session::CAPABILITY_TOPIC` const and the
-  keep-import-alive `unused_topic_import_is_for_docs` test.
-
 ### Added (Phase 2: infrastructure)
 
 `crates/infrastructure` is now live (was a 7-line placeholder). The
@@ -146,8 +117,7 @@ Everything in Start.md §13.1 is implemented:
   (caller fails closed). Each file carries `FileIdentity` (Windows
   `BY_HANDLE_FILE_INFORMATION` via `CreateFileW` with `FILE_FLAG_OPEN_REPARSE_POINT`;
   Unix `dev`/`ino`) and `allocated_len` (Windows `GetCompressedFileSizeW`,
-  Unix `st_blocks * 512`). 14 unit tests including a real junction
-  via `mklink /J` and a hard-link dedup assertion.
+  Unix `st_blocks * 512`).
 - **Size aggregation** (`disk_usage`): `UsageAccumulator` dedupes
   hard links by identity (§8), reports
   `hardlink_duplicates_skipped` and `unidentifiable_files`, and drops

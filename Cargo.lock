@@ -12,8 +12,16 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "agenttidy-application"
 version = "0.1.0"
 dependencies = [
+ "agenttidy-claude-code",
+ "agenttidy-codex",
  "agenttidy-core",
+ "agenttidy-infrastructure",
  "agenttidy-provider-api",
+ "agenttidy-workbuddy",
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -36,8 +44,12 @@ dependencies = [
 name = "agenttidy-cli"
 version = "0.1.0"
 dependencies = [
+ "agenttidy-application",
+ "agenttidy-core",
  "anyhow",
  "clap",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

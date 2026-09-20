@@ -188,3 +188,27 @@ Tests: 3 new in workbuddy (slug + detect), 4 in claude-code (slug +
 ISO 8601 parse + detect), 3 in codex (ISO 8601 + detect). Workspace
 total: 64 tests. `cargo fmt` and `cargo clippy --workspace
 --all-targets -- -D warnings` clean.
+
+### Added (Phase 4: CLI and application layer)
+
+- **Application API** (`crates/application`): `create_registry` wires
+  the three provider adapters into a `ProviderRegistry`; `detect_all`,
+  `scan_installation`, `inspect_installation`, `capabilities_for`
+  forward to the adapter trait. The crate is the single stable entry
+  point shared by GUI and CLI (§13) — neither bypasses it.
+- **CLI** (`apps/cli`): four subcommands wired through the Application
+  API (§15):
+  * `agenttidy doctor` — lists detected installations with version,
+    status, data roots, and per-installation inspection (schema
+    versions, journal modes, unknown structures, problems).
+  * `agenttidy scan` — scans all installations and prints per-provider
+    and total session/resource/logical-bytes summary.
+  * `agenttidy sessions` — lists all sessions across providers with
+    provider, title/ID, size, and cwd/project.
+  * `agenttidy clean --dry-run` — reports cleanup candidates
+    (inactive sessions + logs/caches) with reclaimable bytes; no
+    execution (Phase 6). `clean` without `--dry-run` prints a Phase 6
+    placeholder.
+
+New workspace deps: tokio (cli), agenttidy-workbuddy / claude-code /
+codex + agenttidy-infrastructure (application).

@@ -12,7 +12,7 @@
 
 ## Installation & data locations (macOS)
 
-Root: `~/.claude/` (all state under one directory; no `~/Library/Application Support` involvement observed).
+Root: `~/.claude/` (all state under one directory; no `~/Library/Application Support` involvement observed). Unlike WorkBuddy/Codex Desktop, **no default workspace directory is created outside the state root** — sessions run directly in the user's chosen cwd; there is nothing additional to scan under `~/Documents` or similar. Install locations (for detection only, never clean): CLI at `~/.local/bin/claude` (symlink → `~/.local/share/claude/versions/<ver>`), desktop app at `/Applications/Claude.app`.
 
 | Path | Role | Size (sample) | Cleanup class |
 |---|---|---|---|

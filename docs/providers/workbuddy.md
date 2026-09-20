@@ -12,7 +12,7 @@
 
 ## Installation & data locations (macOS)
 
-Root: `~/.workbuddy/` (4.4 GB total in sample). Also writes workspace scratch dirs under `~/WorkBuddy/<timestamp or name>/` (outside the root!).
+Root: `~/.workbuddy/` (4.4 GB total in sample). App installed at `/Applications/WorkBuddy.app`; bundled CLI `workbuddy` elsewhere. **Additional scan locations beyond the state root** (see "Default workspace directories" below): `~/WorkBuddy/` and per-workspace nested `.workbuddy/` dirs.
 
 | Path | Role | Size (sample) | Cleanup class |
 |---|---|---|---|
@@ -46,12 +46,47 @@ Root: `~/.workbuddy/` (4.4 GB total in sample). Also writes workspace scratch di
 
 - **Session ID**: UUIDv4. Two-layer storage:
   1. `workbuddy.db.sessions` row (id, cwd, user_id, title, status, created_at, updated_at, deleted_at, source_mode (`working`/`craft`/`design`), model, project_id, buddy_snapshot_id, …) — 305 rows in sample.
-  2. Transcript on disk: `projects/<cwd-slug>/<uuid>.jsonl` (same slug scheme as Claude Code: `/` → `-`), plus optional side dir `<uuid>/tool-results/`.
+  2. Transcript on disk: `projects/<cwd-slug>/<uuid>.jsonl` (slug scheme: `/` → `-`, **all other characters preserved verbatim** — spaces, CJK, dots survive; see "User-chosen working directories" below), plus optional sidecar files:
+     - `<uuid>/` dir (`tool-results/`)
+     - `<uuid>.meta.json` (e.g. host connection metadata)
+     - `<uuid>.file-rollback.ndjson` (file-rollback journal)
 - Transcript line types (sample): `message` (role user/assistant), `function_call`, `function_call_result`, `reasoning`, `file-history-snapshot`. Lines carry `id`, `timestamp` (epoch ms), `sessionId`, `cwd`, `providerData`.
 - `session_usage(session_id, used, size, updated_at, credit_json)` — per-session size accounting already exists in-app.
 - `workspaces(path PRIMARY KEY, last_opened_at)` — known working directories (14 in sample).
 - `buddy_snapshots` — agent persona snapshots referenced by `sessions.buddy_snapshot_id`.
 - `automations`, `automation_runs`, `automation_delivery_outbox`, `automation_runtime_state` — scheduled automations (14 in sample), referencing `cwds` (JSON array of paths).
+
+### User-chosen working directories (critical)
+
+A WorkBuddy conversation's cwd is **not** restricted to a project checkout: the user picks any directory at session creation (default scratch dirs like `~/WorkBuddy/2026-08-14-09-00-52`, but also arbitrary named dirs — sample includes `/Users/lxy/WorkBuddy/Telegram 方向竞品调研` and `/Users/lxy/WorkBuddy/个人社媒`, i.e. **spaces and CJK in both cwd and thus on-disk slug dirs**).
+
+Implications:
+
+- **Slug ↔ cwd is a bijection** (only `/` → `-`; no escaping/hashing). Decoding a slug back to a cwd is exact — including case, spaces, Unicode. Never normalize NFC or strip characters when mapping; store paths as-is.
+- **`-` is ambiguous in reverse mapping** (`/a/b` and `/a-b` produce different slugs, but a cwd *containing* `/`-adjacent hyphens still round-trips since only separators are replaced — decode requires trying the DB `sessions.cwd` as source of truth instead of blind slug inversion when in doubt).
+- The cwd may point at **user content** (e.g. `~/WorkBuddy/半自动社媒` holds the user's own files). The transcript lives under `~/.workbuddy/projects/…` — separate from the workspace itself; we only ever touch the transcript side.
+- `automations.cwds` and `workspaces` reference these arbitrary cwds too — the "is this directory still in use?" check must consult both tables, not just sessions.
+- Windows (unverified): cwd may be a different drive (`D:\…`); slug mapping on `\` separators needs a real Windows sample before freezing the algorithm.
+
+### Default workspace directories & nested agent state (critical for scanning)
+
+WorkBuddy's default conversation workspace root is **`~/WorkBuddy/`** (note: case-insensitive APFS tolerates `~/Workbuddy/`; observed both spellings — scan must compare case-insensitively on macOS and treat them as the same root):
+
+1. **Default scratch workspaces**: `~/WorkBuddy/YYYY-MM-DD-HH-MM-SS/` (auto-named, one per new conversation) and `automation-<ts>/` (automation workspaces). Sample: 84+ timestamp dirs. These accumulate forever; they contain agent-written files the user may or may not still want → **Blocked** for cleanup, valuable for space attribution.
+2. **Named workspaces**: user-named dirs directly under `~/WorkBuddy/` (e.g. `个人社媒/`, `WABA/`, `Claw/`) — user content, Blocked.
+3. **Nested `.workbuddy/` state dirs inside workspaces**: `~/WorkBuddy/.workbuddy/memory/` (daily memory notes `YYYY-MM-DD.md`) and `.workbuddy/automations/<id>/memory.md` — WorkBuddy writes agent state **inside the workspace** itself. Any "clean a workspace dir" reasoning must account for hidden agent state; conversely, deleting session data in `~/.workbuddy` does not remove these.
+4. Loose files at workspace root (sample: `x_posts_record.json` + 4 `.bak` variants, generated scripts/HTML) — agent-produced user artifacts, Blocked.
+
+**Scan locations for WorkBuddy** (deduplicated, case-insensitive on macOS):
+
+| Location | Content | Role in app |
+|---|---|---|
+| `~/.workbuddy/` | transcripts, DBs, caches (this doc) | State root — primary scan target |
+| `~/WorkBuddy/` (any case) | default scratch workspaces + named workspaces | Workspace root — report-only (Blocked) |
+| `~/WorkBuddy/.workbuddy/` | workspace-scoped agent memory/automation notes | Hidden agent state inside user-visible tree |
+| `/Applications/WorkBuddy.app` | app bundle | Detection only (installed? version?) |
+
+Correlation: `workspaces` table + `sessions.cwd` + `automations.cwds` tell which workspace dirs are referenced; **81 of 305 sampled sessions have cwd absent from `workspaces`** — workspace registry is NOT authoritative for "is a directory still used"; consult sessions/automations too. Space attribution for `~/WorkBuddy/*` goes through the sessions' `cwd` values, same as any user-chosen directory.
 
 ## Archive / lifecycle semantics
 
@@ -75,7 +110,9 @@ Root: `~/.workbuddy/` (4.4 GB total in sample). Also writes workspace scratch di
 │   ├── session_usage (session size)
 │   └── automations → cwds[] (workspace paths)
 ├── projects/<slug>/<uuid>.jsonl          (transcript; slug↔cwd)
-│   └── <uuid>/tool-results/             (owned by session <uuid>)
+│   ├── <uuid>/tool-results/             (owned by session <uuid>)
+│   ├── <uuid>.meta.json                 (session-scoped sidecar)
+│   └── <uuid>.file-rollback.ndjson      (session-scoped sidecar)
 ├── blobs/<shard>/                        (content-addressed, shared)
 ├── file-history/<uuid>/<hash>@v<n>/      (file snapshots)
 ├── clipboard-images/                    (pasted images)
@@ -104,7 +141,7 @@ Deleting a transcript while leaving `sessions` row (or vice versa) creates dangl
 
 ## Atomic cleanup units
 
-- ✅ Candidate: transcript `projects/<slug>/<uuid>.jsonl` + `<uuid>/` side dir, **only for sessions with `deleted_at IS NOT NULL`** and consistent `session_usage` — still requires DB row handling per red line #7/#8 (v0.1 read-only: report only).
+- ✅ Candidate: transcript `projects/<slug>/<uuid>.jsonl` + `<uuid>/` side dir + `<uuid>.meta.json` + `<uuid>.file-rollback.ndjson` (full session file set), **only for sessions with `deleted_at IS NOT NULL`** and consistent `session_usage` — still requires DB row handling per red line #7/#8 (v0.1 read-only: report only).
 - ✅ Candidate: `edge-sync-mapping-v1..v3.db(+wal/shm)` superseded generations (needs app-not-running + v4 healthy check).
 - ❌ Not units: `binaries/`, `app/`, `plugins/` (program files), `blobs/` (shared, content-addressed, no verified back-refs), `audit-log/`, `models.json`, persona files.
 
@@ -114,17 +151,21 @@ Deleting a transcript while leaving `sessions` row (or vice versa) creates dangl
 - Deleted sessions (88% of sample) leave transcripts on disk — user-visible "deleted" in-app does not mean disk-freed; AgentTidy must not assume DB state == disk state.
 - Session dirs live in the **same tree** as nothing else session-scoped; but `projects/<slug>/` interleaves many sessions — never delete a whole slug dir on one session's behalf.
 - Automations reference cwds; a "stale" project dir may still be an automation target.
-- `~/WorkBuddy/` scratch workspaces (user data!) live outside `~/.workbuddy` — out of scope, never touch.
+- `~/WorkBuddy/` scratch workspaces (user data!) live outside `~/.workbuddy` — out of scope for cleanup, never touch; but they are **in scope for detection and space reporting** (default-workspace scan, see above).
+- **Nested `.workbuddy/` state inside `~/WorkBuddy/`** means "agent data" and "user data" interleave in the same visible tree; a scanner must descend into workspace dirs to find hidden agent state, while cleanup of the surrounding user files stays Blocked.
+- **User-chosen cwds can be arbitrary user directories** (spaces, CJK, possibly the user's document folders). Path handling must be Unicode-correct end-to-end; slug dirs with CJK names must not be treated as anomalies. Reverse slug→cwd mapping is ambiguous in theory — prefer `sessions.cwd` from the DB as the source of truth; only fall back to slug decoding when the DB row is missing, and mark such sessions for extra scrutiny.
 
 ## Capability degradation rules
 
-- `workbuddy.db` missing/corrupt ⇒ fall back to slug-dir transcript scan (degraded: no deleted_at/status info ⇒ all sessions Unknown → Blocked for cleanup, list-only).
+- `workbuddy.db` missing/corrupt ⇒ fall back to slug-dir transcript scan (degraded: no deleted_at/status info ⇒ all sessions Unknown → Blocked for cleanup, list-only). Slug decoding without DB cross-check is lossy-risky (user cwds may contain arbitrary characters) ⇒ extra Blocked.
 - Transcript first line not a `message` with `sessionId` ⇒ Unknown → Blocked.
 - `last-launch.json` version older than min-supported ⇒ warn, degrade to list-only.
 
 ## Open questions (Phase 0 continues)
 
-- [ ] Windows path (`%USERPROFILE%\.workbuddy` assumed — verify).
+- [ ] Windows path (`%USERPROFILE%\.workbuddy` assumed — verify; also `\`-separator slug mapping with cross-drive cwds on Windows, and the Windows default workspace root — `%USERPROFILE%\WorkBuddy\`?).
 - [ ] Does WorkBuddy have a native "empty trash" that also removes transcripts? (worth investigating before we clean orphans)
 - [ ] `traces/` and `logs/` retention knobs in-app?
 - [ ] Blob GC: are `blobs/` entries ever unreferenced? Needs write-path study.
+- [ ] Confirm the full set of per-session sidecar filename patterns (`<uuid>.meta.json`, `<uuid>.file-rollback.ndjson` observed — are there more?).
+- [ ] Is the default workspace root configurable in-app (registry/setting)? If so, discovery must read the config, not assume `~/WorkBuddy/`.

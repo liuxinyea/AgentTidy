@@ -31,6 +31,23 @@ Root: `~/.codex/`. Unlike Claude Code, Codex keeps **both** JSONL rollouts and s
 | `models_cache.json`, `cc-switch-model-catalog.json` | Model catalog caches | — | Cache |
 | `archived_sessions/` sibling dirs (`agents/`, `automations/`, `browser/`, `computer-use/`, `generated_images/`, `goals_1.sqlite`…) | Feature data | — | Not yet classified |
 
+### Default workspace directories (outside `~/.codex`!)
+
+Codex Desktop / Codex app creates **default per-day workspace dirs under `~/Documents/Codex/`** when the user starts a conversation without picking a folder:
+
+```
+~/Documents/Codex/YYYY-MM-DD/<chat-name>/        # e.g. 2026-09-10/new-chat/
+├── work/                                       # agent working files
+└── outputs/                                    # produced artifacts
+```
+
+- Verified in sample: 8 day-dirs (2026-07-15 → 2026-09-10), nested chat dirs including URL-derived slugs (`https-www-producthunt-com-products-tgdown`); corresponding threads exist in `state_5.sqlite` with these cwds.
+- These hold **user-visible artifacts** (agent-written files), not session transcripts. They are user data — AgentTidy may *report* them (size, owning thread) but must treat them as **Blocked** for cleanup by default.
+- Scan requirement: detection must cover `~/Documents/Codex/` in addition to `~/.codex/`, and correlate via `threads.cwd` to attribute space to sessions.
+- Windows equivalent (unverified, assumed `%USERPROFILE%\Documents\Codex\`).
+
+Related: `~/Documents/ChatGPT/` (153 MB in sample) is the analogous default workspace for the ChatGPT desktop app (contains full user projects with `.git`, `node_modules` — pure user data, Blocked). Not a v0.1 target provider, but detection should recognize it to avoid misclassifying it as an unknown agent dir.
+
 ## Version discovery mechanism
 
 - `codex --version` → `codex-cli 0.152.0`.
@@ -104,6 +121,7 @@ Deleting a rollout file **without** DB consistency breaks: `threads.rollout_path
 - **Live WAL writers**: opening a DB read-write or deleting during writes corrupts state.
 - **Orphaned tmp files** (`..codex-global-state.json.tmp-*`) show the atomic-write pattern fails sometimes — cleanup logic must not treat "tmp suffix" as unknown garbage blindly; verify no `.json` counterpart is newer.
 - Subagent rollouts have `parent_thread_id`; deleting a parent must consider children (spawn edges).
+- `~/Documents/Codex/` workspaces mix agent-generated files with user-moved/user-edited content — never clean wholesale; attribute-only (Blocked).
 
 ## Capability degradation rules
 
@@ -114,7 +132,8 @@ Deleting a rollout file **without** DB consistency breaks: `threads.rollout_path
 
 ## Open questions (Phase 0 continues)
 
-- [ ] Windows path (`%USERPROFILE%\.codex` assumed — verify).
+- [ ] Windows path (`%USERPROFILE%\.codex` assumed — verify; also whether the default workspace is `%USERPROFILE%\Documents\Codex\` on Windows).
 - [ ] Does Codex expose a native "delete thread" that also fixes DB? (protocol investigation)
 - [ ] `logs_2.sqlite` rotation/retention policy (does Codex ever prune it?).
 - [ ] Behavior of `attachments/` when its thread is archived (moved or left?).
+- [ ] When are `~/Documents/Codex/YYYY-MM-DD/<chat>/` dirs created vs a user-picked cwd? (default-workspace trigger conditions)

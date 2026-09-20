@@ -1,21 +1,112 @@
 # Claude Code Provider Investigation
 
-> Status: **Not started** (Phase 0)
+> Status: **In progress** — macOS sample collected 2026-09-19 (Claude Code 2.1.235 CLI; sample session written by 2.1.274).
 >
-> This document must be filled from real samples, not guesses.
+> Windows paths not yet verified. Filled from real samples, not guesses.
 
-## Required contents (per design doc §17)
+## Verified version matrix
 
-- [ ] Installation & data locations (macOS / Windows)
-- [ ] Version discovery mechanism
-- [ ] Session identity & storage structure
-- [ ] Archive / lifecycle semantics
-- [ ] Project mapping
-- [ ] Resource dependency graph
-- [ ] Caches, logs, checkpoints
-- [ ] Databases & schema
-- [ ] Runtime write behavior
-- [ ] Atomic cleanup units
-- [ ] Known risks
-- [ ] Capability degradation rules
-- [ ] Verified version matrix
+| Platform | CLI version | Sample date | Notes |
+|---|---|---|---|
+| macOS (arm64, Darwin 25.6.0) | 2.1.235 | 2026-09-19 | `claude --version`; sessions record `version` per line |
+
+## Installation & data locations (macOS)
+
+Root: `~/.claude/` (all state under one directory; no `~/Library/Application Support` involvement observed).
+
+| Path | Role | Size (sample) | Cleanup class |
+|---|---|---|---|
+| `projects/<cwd-slug>/<session-id>.jsonl` | Session transcripts (JSONL, append-only) | 39 MB / 61 files | Per-session |
+| `projects/<cwd-slug>/<session-id>/` | Per-session side dir (`subagents/`, `auto-mode-classifier-error.txt`) | — | Per-session |
+| `projects/<cwd-slug>/memory/` | Per-project agent memory | empty in sample | Shared per project |
+| `file-history/<hash>@v<n>/` | File edit snapshots (content-addressed) | 832 KB | Shared / review |
+| `shell-snapshots/` | Shell env snapshot per shell PID | 2.7 MB | Cache-like |
+| `session-env/` | Per-session env records (often empty) | 0 B | Per-session |
+| `plans/`, `tasks/` | Plan & task outputs | <200 KB | Per-session-ish |
+| `history.jsonl` | Global prompt history (one line per prompt, has `project` field) | 22 KB | Shared |
+| `stats-cache.json` | Cached daily usage stats (`dailyActivity[]` with `sessionCount`) | — | Derivable cache |
+| `backups/`, `cache/`, `paste-cache/`, `debug/`, `downloads/`, `ide/`, `daemon/`, `jobs/`, `skills/`, `plugins/`, `agents/`, `todo*` | App-managed caches / state | — | Not yet classified |
+| `.last-cleanup`, `.last-update-result.json`, `config.json`, `settings.json` | Markers / config | — | Never clean |
+
+`<cwd-slug>` = absolute cwd with `/` → `-` (e.g. `/Users/lxy/Desktop/MyProjects/AgentTidy` → `-Users-lxy-Desktop-MyProjects-AgentTidy`). No hashing — path is recoverable by inverse mapping, and each transcript line also carries the original `cwd`.
+
+## Version discovery mechanism
+
+- `claude --version` → `2.1.235 (Claude Code)`.
+- Every JSONL line records the writing version in `version` (e.g. `2.1.274`), so a session can span versions.
+
+## Session identity & storage structure
+
+- **Session ID**: UUIDv4 (`sessionId` on every line; matches filename `<uuid>.jsonl`).
+- **Transcript**: one JSONL file per session, append-only; a session has exactly one file in exactly one project dir.
+- **Line types observed** (sample file): `user` (155), `assistant` (211), `attachment` (91), `queue-operation`, `atis-latch`, `last-prompt`.
+- **Line-level metadata** (present on user/assistant/attachment lines): `uuid`, `parentUuid`, `timestamp` (ISO 8601 UTC), `cwd`, `gitBranch`, `sessionId`, `version`, `permissionMode`, `isSidechain`, `entrypoint`, `userType`.
+- **Messages**: `message.content` is either a string or an array of `{type: text|tool_result|…}` blocks (Anthropic message shape).
+- **Subagents**: nested under `projects/<slug>/<session-id>/subagents/agent-*.jsonl` + `.meta.json`; the subagent transcript's `sessionId` still points at the **parent** session UUID. Meta records `agentType`, `toolUseId`, `spawnDepth`, `requestShape`.
+- **Sidechains**: lines with `isSidechain: true` stay inside the main file.
+- No SQLite anywhere in `~/.claude` — JSONL is the only session store.
+
+## Archive / lifecycle semantics
+
+- No archive directory or archive marker observed; old sessions simply remain in `projects/` forever (sample history back to 2025-09). `.last-cleanup` records an ISO timestamp of Claude Code's own internal cleanup — semantics unknown, treat as opaque marker, not an archive.
+- **Archive ≠ deletable** still applies (red line #5).
+
+## Project mapping
+
+- Directory name = cwd slug; every line carries original `cwd` → two independent ways to map session → project.
+- `history.jsonl` lines carry `project` (cwd) for prompt-level history.
+- `projects/` contains only project dirs; a project with zero sessions may still hold `memory/`.
+
+## Resource dependency graph
+
+```
+~/.claude
+├── projects/<slug>/                     (project node)
+│   ├── <uuid>.jsonl                     (session transcript — the primary resource)
+│   ├── <uuid>/subagents/agent-*.jsonl   (owned by session <uuid>)
+│   └── memory/                          (project-shared)
+├── history.jsonl                        (global; references cwd only)
+├── file-history/<hash>@v<n>/            (content-addressed; NOT keyed by session — shared)
+├── shell-snapshots/<pid>-…              (keyed by shell PID, ephemeral)
+└── session-env/<uuid>…                  (session-scoped)
+```
+
+Key edges: session → its side dir (delete together); project → memory (do not delete with one session); file-history is content-addressed with no verified session back-reference → treat as Shared/Review.
+
+## Caches, logs, checkpoints
+
+- `cache/`, `paste-cache/`, `shell-snapshots/`, `stats-cache.json`, `backups/`, `debug/` — cache/backup class; sizes small in sample but classification for cleanup needs per-dir write-behavior confirmation.
+- `file-history/` is the checkpoint/restore system for edited files — needed for `/rewind`; deletion trades recoverability for space.
+
+## Databases & schema
+
+- None (JSONL + JSON files only).
+
+## Runtime write behavior
+
+- Transcripts are append-only; `claude` may be running with a live file handle (`daemon/`, `ide/`, per-PID ports under `session-env/` indicate background processes exist).
+- Assume "session file mtime within N minutes / process running" ⇒ active ⇒ Blocked.
+
+## Atomic cleanup units
+
+- ✅ Unit: `projects/<slug>/<uuid>.jsonl` + `projects/<slug>/<uuid>/` (transcript + side dir).
+- ❌ Not units: `projects/<slug>/memory/` (project-shared), `file-history/` entries (no verified back-ref), `history.jsonl` lines (append-only global log; no per-line deletion format defined).
+
+## Known risks
+
+- Subagent transcripts live *inside* the parent session's side dir → unit deletion must include the whole `<uuid>/` dir, and must not delete sibling `memory/`.
+- Session file names are plain UUIDs; two projects can theoretically hold the same UUID filename (different parent dirs) — always key by full path.
+- `history.jsonl` is a global append-only log; removing sessions does not remove their prompts from history (privacy review must call this out).
+- Live processes append to transcripts concurrently (daemon/IDE) → revalidate mtime before execute.
+
+## Capability degradation rules
+
+- If a `projects/<slug>` dir fails to parse as a slug (e.g. hand-created), treat contained sessions as Unknown → Blocked.
+- If `projects/<slug>/<uuid>.jsonl` exists but lines lack `sessionId` → Unknown → Blocked.
+- Missing `history.jsonl` or `stats-cache.json` degrades stats only, not session listing.
+
+## Open questions (Phase 0 continues)
+
+- [ ] Windows path for `~/.claude` (`%USERPROFILE%\.claude` assumed — verify on real Windows machine).
+- [ ] Whether `backups/` is safe to clean (write cadence unknown).
+- [ ] `file-history` retention semantics across Claude Code versions.

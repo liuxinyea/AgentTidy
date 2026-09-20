@@ -65,7 +65,7 @@ impl ProjectRef {
 ///
 /// The design doc rule: agents without an archive concept must not use
 /// `Archived`. `Unknown` is fail-closed — cleanup treats it as Blocked.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum SessionLifecycle {
     /// Currently being written to (running process or very recent mtime).
@@ -82,6 +82,7 @@ pub enum SessionLifecycle {
     /// Finished, not archived, no recent activity.
     Inactive,
     /// State could not be determined — fail closed.
+    #[default]
     Unknown,
 }
 

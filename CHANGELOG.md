@@ -148,3 +148,43 @@ Tests: 31 in infrastructure (31 pass on Windows). Workspace total:
 New workspace deps: `walkdir`, `rusqlite` (bundled), `trash`, `sysinfo`,
 `windows-sys` (Win32_Storage_FileSystem, Win32_Foundation, Win32_Security —
 last one gates `CreateFileW`'s `SECURITY_ATTRIBUTES` signature).
+
+### Added (Phase 3: three read-only providers)
+
+- **WorkBuddy provider** (`providers/workbuddy`): `WorkBuddyAdapter`
+  implementing `AgentProviderAdapter`. `detect` checks
+  `~/.workbuddy/` (state root) and `~/WorkBuddy/` (default workspace
+  root); `inspect` reads `last-launch.json` for version and opens
+  `workbuddy.db` for Drizzle migration schema + journal mode;
+  `capabilities` reports `Sessions`/`Projects`/`Archive`/`Logs` when
+  the DB is readable; `scan` reads `workbuddy.db.sessions` for
+  session metadata and walks `projects/<slug>/` for JSONL transcripts
+  and their sidecar dirs, plus `logs/` and `traces/` for shared
+  resources. `slug_to_cwd` implements the WorkBuddy slug→cwd inverse
+  (Windows: `:` dropped, `\` → `-`; Unix: `/` → `-`).
+- **Claude Code provider** (`providers/claude-code`): `ClaudeCodeAdapter`.
+  `detect` checks `~/.claude/`; `inspect` reads `config.json` for
+  version; `capabilities` reports `Sessions`/`Projects`/`Logs`;
+  `scan` walks `projects/<slug>/` for JSONL transcripts and sidecars
+  (subagents, etc.), plus `file-history/` (shared, content-addressed
+  checkpoints) and `shell-snapshots/` (cache). `slug_to_cwd`
+  implements the Claude Code slug→cwd inverse (Windows: both `:` and
+  `\` → `-`; Unix: `/` → `-`).
+- **Codex provider** (`providers/codex`): `CodexAdapter`. `detect`
+  checks `~/.codex/` (state root) and `~/Documents/Codex/` (default
+  workspace root); `inspect` opens `state_5.sqlite`,
+  `thread_history_1.sqlite`, `logs_2.sqlite` for schema + journal
+  mode; `capabilities` reports `Sessions`/`Projects`/`Archive`/`Logs`
+  when the state DB is readable; `scan` reads `state_5.sqlite.threads`
+  for session metadata and walks `sessions/YYYY/MM/DD/` for JSONL
+  rollouts, plus `archived_sessions/`, `logs_2.sqlite`, `cache/`.
+  Codex sessions carry `source` and `cli_version` metadata from the
+  rollout's `session_meta` payload.
+
+Provider workspace deps added: `async-trait`, `dirs` 5.
+Phase 1: `SessionLifecycle` now derives `Default` (→ `Unknown`).
+
+Tests: 3 new in workbuddy (slug + detect), 4 in claude-code (slug +
+ISO 8601 parse + detect), 3 in codex (ISO 8601 + detect). Workspace
+total: 64 tests. `cargo fmt` and `cargo clippy --workspace
+--all-targets -- -D warnings` clean.

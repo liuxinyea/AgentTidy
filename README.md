@@ -18,9 +18,10 @@ See [`Start.md`](./Start.md) for the full v0.1 design document (Chinese).
 
 ## Status
 
-Pre-alpha. Project skeleton only — see the
-[development phases](./Start.md#19-开发顺序). First release targets read-only
-analysis of **WorkBuddy**, **Claude Code** and **Codex** on macOS and Windows.
+Pre-alpha. See the [development phases](./Start.md#19-开发顺序) and the
+[project progress changelog](./docs/CHANGELOG.md). First release targets
+read-only analysis of **WorkBuddy**, **Claude Code** and **Codex** on macOS and
+Windows.
 
 ## Architecture
 
@@ -69,6 +70,100 @@ cargo build --workspace          # build all Rust crates
 cargo test --workspace           # run tests
 cargo run -p agenttidy-cli       # run the CLI
 pnpm tauri dev                   # run the desktop app
+```
+
+## CLI v0.1 — release usage
+
+The first CLI release is diagnostic-only: it discovers supported local agent
+data and reports session and storage facts. It never changes agent data or a
+workspace. Cleanup, candidate selection, time-range filtering and confirmations
+belong to the future desktop GUI.
+
+### Build a release binary
+
+Rust stable is required. Build the binary for the current platform:
+
+```bash
+cargo build --release -p agenttidy-cli
+./target/release/agenttidy --version
+./target/release/agenttidy --help
+```
+
+The resulting executable is `target/release/agenttidy` on macOS/Linux and
+`target\\release\\agenttidy.exe` on Windows. Distribute that binary together
+with its matching platform build; do not copy a macOS binary to Windows or the
+reverse.
+
+### Commands
+
+```bash
+# Inspect discovered installations, paths, permissions and capabilities.
+agenttidy doctor
+
+# Summarize known sessions, resources and default workspace footprint.
+agenttidy scan
+
+# Print recognizable sessions, one per line.
+agenttidy sessions
+
+```
+
+When running from a source checkout, replace `agenttidy` with
+`cargo run -p agenttidy-cli --`.
+
+Without `--json`, commands render adaptive Unicode tables with readable byte
+units and coloured status cells. Table width follows `COLUMNS` when it is set,
+with a safe 120-column fallback for redirected output.
+
+### JSON for automation
+
+Append `--json` to any diagnostic command:
+
+```bash
+agenttidy doctor --json
+agenttidy scan --json
+agenttidy sessions --json
+```
+
+Every JSON response uses the versioned `agenttidy.cli.v1` envelope:
+
+```json
+{
+  "schema_version": "agenttidy.cli.v1",
+  "command": "scan",
+  "mode": "read-only",
+  "data": []
+}
+```
+
+Automation should check `schema_version` and `command`, and treat fields under
+`data` as the command-specific contract. Human-readable output is intended for
+interactive use and is not a scripting API.
+
+### Release verification
+
+Run these from the repository root before publishing a build:
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo build --release -p agenttidy-cli
+./target/release/agenttidy --help
+./target/release/agenttidy doctor --json
+./target/release/agenttidy scan --json
+```
+
+On Windows, use `target\\release\\agenttidy.exe` in the last three commands.
+The `doctor` and `scan` smoke tests should complete even when no supported
+agent is installed; an empty `data` array is a valid result. A non-zero exit
+means the diagnostic command could not complete.
+
+For a machine-readable smoke assertion when `jq` is available:
+
+```bash
+./target/release/agenttidy scan --json \
+  | jq -e '.schema_version == "agenttidy.cli.v1" and .command == "scan" and .mode == "read-only"'
 ```
 
 ## License

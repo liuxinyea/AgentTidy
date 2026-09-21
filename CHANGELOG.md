@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Adaptive, terminal-friendly Unicode tables for the human-facing CLI output,
+  with readable byte units and status colours; `--json` remains unchanged for
+  automation.
+- Versioned JSON envelopes (`agenttidy.cli.v1`) for every CLI machine-output
+  command, including its command name and explicit `read-only` mode.
+- Pure application-level workspace preview admission checks with regression
+  coverage for the exact-session and WorkBuddy automation-reference gates;
+  this is reserved for the future GUI and deliberately not exposed by the CLI.
+- Initial Codex read-only provider adapter: detects the shared Codex state
+  root, reports inspection facts and scans rollout JSONL `session_meta`
+  records without reading transcript bodies. It reads the documented
+  `state_5.sqlite.threads` index read-only to enrich session metadata; an
+  unavailable or inconsistent index degrades diagnostics, while malformed
+  rollouts remain blocked by default.
+- Initial Claude Code CLI read-only provider adapter: discovers the verified
+  `~/.claude` root and scans only top-level project transcripts. A transcript
+  and its same-named side directory form one measured Session resource;
+  filename/session-id mismatches remain blocked by default.
+- Initial WorkBuddy read-only provider adapter: scans only the verified
+  transcript file set and reports database journal facts without querying
+  session lifecycle. Claude Desktop is discovered as a second Claude Code
+  installation and scans only embedded transcript mirrors, excluding VM,
+  credential, audit and user-output paths.
+- Phase 4 read-only application/CLI path: static registration of the three
+  providers and functional `doctor`, `scan`, and `sessions` commands. Cleanup
+  is intentionally a future GUI-only workflow, not a CLI subcommand.
+- Documented the future default-workspace cleanup gate: exact exclusive
+  session ownership, no Git repository or shared references, OS Trash only,
+  revalidation, risk disclosure, and two independent user confirmations.
+- Added read-only accounting for the verified Codex and WorkBuddy default
+  workspace roots; CLI scan reports their footprint separately from sessions.
+- Development progress changelog at `docs/CHANGELOG.md`: a Phase 0–8
+  milestone view with current work, verification blockers and maintenance
+  conventions; README now links to it.
 - Initial project skeleton: Rust workspace (core, application, infrastructure,
   provider-api, test-support crates; workbuddy / claude-code / codex provider
   crates; `agenttidy` CLI with placeholder subcommands), Tauri 2 + React
@@ -43,6 +77,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed (Phase 1 review, installation-model alignment)
 
+- Native-trash test now skips its environment-dependent assertion when a
+  headless macOS session has no Finder service; production code still returns
+  the platform error and remains fail-closed.
 - `SessionId` doc corrected: uniqueness is per *installation*, not per
   provider — the same id may legitimately appear in both `claude-code`
   installations (Desktop mirrors CLI transcripts); dedup by

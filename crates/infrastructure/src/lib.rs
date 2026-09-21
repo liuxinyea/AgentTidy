@@ -23,3 +23,4 @@ pub mod paths;
 pub mod processes;
 pub mod sqlite;
 pub mod trash;
+pub mod workspace_safety;

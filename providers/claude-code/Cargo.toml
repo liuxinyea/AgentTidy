@@ -8,3 +8,9 @@ license.workspace = true
 
 [dependencies]
 agenttidy-provider-api = { workspace = true }
+agenttidy-core = { workspace = true }
+agenttidy-infrastructure = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

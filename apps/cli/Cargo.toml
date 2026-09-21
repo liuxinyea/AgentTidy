@@ -13,3 +13,9 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+comfy-table = { workspace = true }
+agenttidy-application = { workspace = true }
+agenttidy-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

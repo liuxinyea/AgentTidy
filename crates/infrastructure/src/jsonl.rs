@@ -60,7 +60,9 @@ impl<T: DeserializeOwned> Iterator for JsonlReader<T> {
             Ok(raw) => raw,
             Err(e) => {
                 // Read error (not a parse error): terminal.
-                return Some(JsonlEvent::Fatal { error: e.to_string() });
+                return Some(JsonlEvent::Fatal {
+                    error: e.to_string(),
+                });
             }
         };
         self.line += 1;

@@ -38,6 +38,9 @@ anyhow = "1"
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
+# comfy-table renders adaptive Unicode tables and ANSI status colors for the
+# human CLI surface. JSON remains the separate stable automation contract.
+comfy-table = "7"
 # Phase 2 infrastructure deps:
 # walkdir: read-only directory enumeration (follow_links=false is the default,
 # which is what §16.1 link-boundary enforcement relies on).

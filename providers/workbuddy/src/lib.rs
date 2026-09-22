@@ -1,625 +1,518 @@
-//! WorkBuddy provider adapter (`docs/providers/workbuddy.md`).
+//! Read-only WorkBuddy provider adapter (`Start.md` §10, Phase 3).
 //!
-//! WorkBuddy is an Electron desktop app. Its data lives under two roots:
-//! - State root: `~/.workbuddy/` (transcripts, DBs, caches)
-//! - Default workspace root: `~/WorkBuddy/` (scratch workspaces, user data)
-//!
-//! This adapter implements the read-only Provider contract (Phase 3):
-//! - `detect`: finds installations by checking well-known paths
-//! - `inspect`: reads `last-launch.json` for version, opens DB for schema/journal
-//! - `capabilities`: reports what topics are available
-//! - `scan`: enumerates sessions from DB + JSONL files, resources from filesystem
+//! The adapter recognizes only the Phase 0-verified session file set. The
+//! WorkBuddy database is opened through the infrastructure read-only guard
+//! for inspection facts; until the `sessions` schema has a contract fixture,
+//! it is never used to infer lifecycle or cleanup eligibility.
 
 use agenttidy_core::{
     AgentCapabilities, AgentInstallation, AgentSnapshot, CapabilityStatus, CapabilityTopic,
-    InstallationStatus, ManagedBy, Ownership, Platform, ProjectRef, ProviderId, Resource,
-    ResourceKind, ResourceLocator, ScanOptions, ScanProblem, Session, SessionId, SessionLifecycle,
-    SizeConfidence, SizeInfo,
+    CleanupPrecondition, CleanupUnit, InstallationStatus, ManagedBy, Ownership, Platform,
+    ProjectRef, ProviderId, Resource, ResourceId, ResourceKind, ResourceLocator, ResourceRef,
+    ScanOptions, ScanProblem, Session, SessionId, SessionLifecycle, SizeConfidence, SizeInfo,
 };
-use agenttidy_infrastructure::{fs_probe, jsonl, sqlite};
+use agenttidy_infrastructure::disk_usage::UsageAccumulator;
+use agenttidy_infrastructure::fs_probe::{walk_tree, EntryKind, WalkProblem};
+use agenttidy_infrastructure::processes::{any_process_running, ProcessSignature};
+use agenttidy_infrastructure::sqlite::ReadOnlyDb;
+use agenttidy_infrastructure::workspace_safety::inspect_workspace_safety;
 use agenttidy_provider_api::{AgentProviderAdapter, ProviderInspection};
-use anyhow::{Context, Result};
+use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Well-known relative paths under the user's home directory.
-const STATE_DIR: &str = ".workbuddy";
-const WORKSPACE_DIR: &str = "WorkBuddy";
+const INSTALLATION_ID: &str = "workbuddy:default";
 
-/// The WorkBuddy provider adapter.
+#[derive(Debug, Default)]
 pub struct WorkBuddyAdapter;
+
+impl WorkBuddyAdapter {
+    fn home_dir() -> Option<PathBuf> {
+        #[cfg(windows)]
+        {
+            std::env::var_os("USERPROFILE").map(PathBuf::from)
+        }
+        #[cfg(not(windows))]
+        {
+            std::env::var_os("HOME").map(PathBuf::from)
+        }
+    }
+
+    fn platform() -> Platform {
+        #[cfg(windows)]
+        {
+            Platform::Windows
+        }
+        #[cfg(not(windows))]
+        {
+            Platform::Macos
+        }
+    }
+
+    fn running() -> bool {
+        any_process_running(&[ProcessSignature::new(&["WorkBuddy", "workbuddy"], &[])])
+    }
+
+    fn readable(path: &Path) -> bool {
+        fs::read_dir(path).is_ok()
+    }
+
+    fn first_line(path: &Path) -> Result<WorkBuddyLine, String> {
+        let file = fs::File::open(path).map_err(|error| error.to_string())?;
+        let line = BufReader::new(file)
+            .lines()
+            .next()
+            .ok_or_else(|| "empty transcript".to_string())?
+            .map_err(|error| error.to_string())?;
+        // The typed shape omits message/providerData, so transcript bodies
+        // are discarded while only session identity and cwd are retained.
+        serde_json::from_str(&line).map_err(|error| error.to_string())
+    }
+
+    fn measure(paths: &[PathBuf]) -> (SizeInfo, BTreeMap<String, ScanProblem>) {
+        let mut usage = UsageAccumulator::new();
+        let mut problems = BTreeMap::new();
+        for path in paths {
+            let outcome = walk_tree(path);
+            for problem in outcome.problems {
+                let WalkProblem::Unreadable { path, error } = problem;
+                problems.insert(
+                    format!("unreadable:{}", path.display()),
+                    ScanProblem::Error {
+                        message: error,
+                        path: Some(path.display().to_string()),
+                    },
+                );
+            }
+            for entry in outcome
+                .entries
+                .iter()
+                .filter(|entry| entry.kind == EntryKind::File)
+            {
+                usage.add_file(entry);
+            }
+        }
+        let usage = usage.finish();
+        (
+            SizeInfo {
+                logical_bytes: usage.logical_bytes,
+                allocated_bytes: usage.allocated_bytes,
+                exclusive_bytes: Some(usage.logical_bytes),
+                confidence: if usage.unidentifiable_files == 0 {
+                    SizeConfidence::Exact
+                } else {
+                    SizeConfidence::Estimated
+                },
+                ..SizeInfo::default()
+            },
+            problems,
+        )
+    }
+
+    fn scan_projects(
+        root: &Path,
+        installation: &AgentInstallation,
+        options: &ScanOptions,
+    ) -> (Vec<Session>, Vec<Resource>, BTreeMap<String, ScanProblem>) {
+        let mut sessions = Vec::new();
+        let mut resources = Vec::new();
+        let mut problems = BTreeMap::new();
+        let projects = root.join("projects");
+        if !projects.is_dir() {
+            problems.insert(
+                "projects-missing".into(),
+                ScanProblem::Warning {
+                    message: "projects directory missing".into(),
+                },
+            );
+            return (sessions, resources, problems);
+        }
+        let outcome = walk_tree(&projects);
+        for problem in outcome.problems {
+            let WalkProblem::Unreadable { path, error } = problem;
+            problems.insert(
+                format!("unreadable:{}", path.display()),
+                ScanProblem::Error {
+                    message: error,
+                    path: Some(path.display().to_string()),
+                },
+            );
+        }
+        for entry in outcome.entries {
+            let direct = entry.kind == EntryKind::File
+                && entry.path.extension().and_then(|part| part.to_str()) == Some("jsonl")
+                && entry
+                    .path
+                    .strip_prefix(&projects)
+                    .ok()
+                    .is_some_and(|relative| relative.components().count() == 2);
+            if !direct {
+                continue;
+            }
+            let path_text = entry.path.display().to_string();
+            let line = match Self::first_line(&entry.path) {
+                Ok(line) if line.session_id.is_some() && line.cwd.is_some() => line,
+                Ok(_) => {
+                    Self::unknown(
+                        &entry.path,
+                        installation,
+                        options,
+                        &mut resources,
+                        &mut problems,
+                        "session line lacks sessionId or cwd",
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    Self::unknown(
+                        &entry.path,
+                        installation,
+                        options,
+                        &mut resources,
+                        &mut problems,
+                        &error,
+                    );
+                    continue;
+                }
+            };
+            let id = line.session_id.expect("checked above");
+            if entry.path.file_stem().and_then(|part| part.to_str()) != Some(id.as_str()) {
+                Self::unknown(
+                    &entry.path,
+                    installation,
+                    options,
+                    &mut resources,
+                    &mut problems,
+                    "sessionId does not match transcript filename",
+                );
+                continue;
+            }
+            let project_dir = entry.path.parent().expect("transcript has project parent");
+            let mut paths = vec![entry.path.clone()];
+            for candidate in [
+                project_dir.join(&id),
+                project_dir.join(format!("{id}.meta.json")),
+                project_dir.join(format!("{id}.file-rollback.ndjson")),
+            ] {
+                if candidate.exists() {
+                    paths.push(candidate);
+                }
+            }
+            let (size, measure_problems) = Self::measure(&paths);
+            problems.extend(measure_problems);
+            let session_id = SessionId::new(id.clone());
+            let resource_id = ResourceId::new(format!("{INSTALLATION_ID}:session:{path_text}"));
+            let project = Some(ProjectRef::from_cwd(line.cwd.expect("checked above")));
+            resources.push(Resource {
+                id: resource_id.clone(),
+                provider: ProviderId::new(ProviderId::WORKBUDDY),
+                installation_id: installation.id.clone(),
+                kind: ResourceKind::Session,
+                locator: ResourceLocator::FileSet {
+                    paths: paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect(),
+                },
+                ownership: Ownership::Exclusive,
+                managed_by: ManagedBy::Agent,
+                size,
+                session_id: Some(session_id.clone()),
+                project: project.clone(),
+                created_at: None,
+                updated_at: None,
+                dependencies: vec![],
+                metadata: serde_json::Map::new(),
+            });
+            sessions.push(Session {
+                id: session_id,
+                provider: ProviderId::new(ProviderId::WORKBUDDY),
+                installation_id: installation.id.clone(),
+                title: None,
+                project,
+                created_at: None,
+                updated_at: None,
+                // Without the DB contract we cannot prove deleted/archived or
+                // inactivity. Unknown keeps future cleanup fail-closed.
+                lifecycle: SessionLifecycle::Unknown,
+                size,
+                resource_refs: vec![ResourceRef {
+                    id: resource_id,
+                    kind: ResourceKind::Session,
+                }],
+                metadata: serde_json::Map::new(),
+            });
+        }
+        (sessions, resources, problems)
+    }
+
+    fn unknown(
+        path: &Path,
+        installation: &AgentInstallation,
+        options: &ScanOptions,
+        resources: &mut Vec<Resource>,
+        problems: &mut BTreeMap<String, ScanProblem>,
+        reason: impl Into<String>,
+    ) {
+        let path = path.display().to_string();
+        problems.insert(
+            format!("unrecognized-transcript:{path}"),
+            ScanProblem::Warning {
+                message: reason.into(),
+            },
+        );
+        if options.include_unknown {
+            resources.push(Resource {
+                id: ResourceId::new(format!("{INSTALLATION_ID}:unknown:{path}")),
+                provider: ProviderId::new(ProviderId::WORKBUDDY),
+                installation_id: installation.id.clone(),
+                kind: ResourceKind::Unknown,
+                locator: ResourceLocator::File { path },
+                ownership: Ownership::Unknown,
+                managed_by: ManagedBy::Agent,
+                size: SizeInfo::unknown(),
+                session_id: None,
+                project: None,
+                created_at: None,
+                updated_at: None,
+                dependencies: vec![],
+                metadata: serde_json::Map::new(),
+            });
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkBuddyLine {
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    cwd: Option<String>,
+}
 
 #[async_trait::async_trait]
 impl AgentProviderAdapter for WorkBuddyAdapter {
     fn id(&self) -> ProviderId {
         ProviderId::new(ProviderId::WORKBUDDY)
     }
-
     fn display_name(&self) -> &str {
         "WorkBuddy"
     }
 
-    /// Find all WorkBuddy installations on this machine.
-    ///
-    /// Checks well-known paths: `~/.workbuddy/` (state root) and
-    /// `~/WorkBuddy/` (default workspace root). Both are included in
-    /// `data_roots` when present.
-    async fn detect(&self) -> Result<Vec<AgentInstallation>> {
-        let home = dirs::home_dir().context("no home directory")?;
-        let state_root = home.join(STATE_DIR);
-        let workspace_root = home.join(WORKSPACE_DIR);
-
-        // WorkBuddy requires the state root to exist; workspace root is
-        // optional (it's created on first conversation).
-        if !state_root.is_dir() {
+    async fn detect(&self) -> anyhow::Result<Vec<AgentInstallation>> {
+        let Some(home) = Self::home_dir() else {
+            return Ok(vec![]);
+        };
+        let state_root = home.join(".workbuddy");
+        if !state_root.exists() {
             return Ok(vec![]);
         }
-
-        let mut data_roots = vec![state_root.to_string_lossy().to_string()];
-        if workspace_root.is_dir() {
-            data_roots.push(workspace_root.to_string_lossy().to_string());
+        let workspace = home.join("WorkBuddy");
+        let mut data_roots = vec![state_root.display().to_string()];
+        if workspace.exists() {
+            data_roots.push(workspace.display().to_string());
         }
-
-        // Version discovery: last-launch.json in state root.
-        let version = read_version(&state_root);
-
         Ok(vec![AgentInstallation {
-            id: format!("{}:default", ProviderId::WORKBUDDY),
-            provider: ProviderId::new(ProviderId::WORKBUDDY),
-            platform: current_platform(),
-            version,
+            id: INSTALLATION_ID.into(),
+            provider: self.id(),
+            platform: Self::platform(),
+            version: None,
             data_roots,
-            status: InstallationStatus::Available,
+            status: if Self::readable(&state_root) {
+                InstallationStatus::Available
+            } else {
+                InstallationStatus::PermissionRequired
+            },
         }])
     }
 
-    /// Pre-scan inspection: version, schema versions, journal modes,
-    /// running state, unknown structures.
-    async fn inspect(&self, installation: &AgentInstallation) -> Result<ProviderInspection> {
-        let state_root = PathBuf::from(&installation.data_roots[0]);
-
-        let version = read_version(&state_root);
-        let mut schema_versions = BTreeMap::new();
+    async fn inspect(
+        &self,
+        installation: &AgentInstallation,
+    ) -> anyhow::Result<ProviderInspection> {
         let mut journal_modes = BTreeMap::new();
-        let unknown_structures = Vec::new();
         let mut problems = BTreeMap::new();
-
-        // Check workbuddy.db
-        let db_path = state_root.join("workbuddy.db");
-        if db_path.is_file() {
-            match sqlite::ReadOnlyDb::open(&db_path) {
-                Ok(db) => {
-                    // Schema version from Drizzle migrations.
-                    if let Ok(ver) = db.connection().query_row(
-                        "SELECT version FROM __workbuddy_drizzle_migrations ORDER BY created_at DESC LIMIT 1",
-                        [],
-                        |row| row.get::<_, String>(0),
-                    ) {
-                        schema_versions.insert("workbuddy.db".into(), ver);
+        if let Some(root) = installation.data_roots.first() {
+            let db_path = Path::new(root).join("workbuddy.db");
+            match ReadOnlyDb::open(&db_path) {
+                Ok(db) => match db.journal_mode() {
+                    Ok(mode) => {
+                        journal_modes.insert("workbuddy".into(), mode);
                     }
-                    if let Ok(mode) = db.journal_mode() {
-                        journal_modes.insert("workbuddy.db".into(), mode);
+                    Err(error) => {
+                        problems.insert(
+                            "workbuddy-db-journal".into(),
+                            ScanProblem::Warning {
+                                message: error.to_string(),
+                            },
+                        );
                     }
-                }
-                Err(e) => {
+                },
+                Err(error) => {
                     problems.insert(
-                        "db-unreadable".into(),
+                        "workbuddy-db-unavailable".into(),
                         ScanProblem::Warning {
-                            message: format!("workbuddy.db: {e}"),
+                            message: error.to_string(),
                         },
                     );
                 }
             }
         }
-
-        // Check for edge-sync-mapping DBs (old generations).
-        for ver in 1..=4 {
-            let name = format!("edge-sync-mapping-v{ver}.db");
-            let path = state_root.join(&name);
-            if path.is_file() {
-                schema_versions.insert(name, format!("v{ver}"));
-            }
-        }
-
-        // Check readable roots.
-        let mut readable_roots = BTreeMap::new();
-        for root in &installation.data_roots {
-            readable_roots.insert(root.clone(), Path::new(root).is_dir());
-        }
-
         Ok(ProviderInspection {
-            version,
-            schema_versions,
+            version: installation.version.clone(),
+            schema_versions: BTreeMap::new(),
             journal_modes,
-            agent_running: false, // Phase 2 process detection is separate
-            readable_roots,
-            unknown_structures,
+            agent_running: Self::running(),
+            readable_roots: installation
+                .data_roots
+                .iter()
+                .map(|root| (root.clone(), Self::readable(Path::new(root))))
+                .collect(),
+            unknown_structures: vec![],
             problems,
         })
     }
 
-    /// Derive capabilities from the inspection result.
-    ///
-    /// WorkBuddy reports `Sessions` and `Logs` as supported when the
-    /// DB is readable; `Archive` is supported because
-    /// `sessions.status` carries archive state.
-    async fn capabilities(&self, inspection: &ProviderInspection) -> Result<AgentCapabilities> {
-        let db_ok = inspection.schema_versions.contains_key("workbuddy.db");
-        let mut caps = AgentCapabilities::empty();
-
-        if db_ok {
-            caps = caps
-                .with(CapabilityTopic::Sessions, CapabilityStatus::Supported)
-                .with(CapabilityTopic::Projects, CapabilityStatus::Supported)
-                .with(CapabilityTopic::Archive, CapabilityStatus::Supported)
-                .with(CapabilityTopic::Logs, CapabilityStatus::Supported);
+    async fn capabilities(
+        &self,
+        inspection: &ProviderInspection,
+    ) -> anyhow::Result<AgentCapabilities> {
+        let readable = !inspection.readable_roots.is_empty()
+            && inspection.readable_roots.values().all(|value| *value);
+        let status = if readable {
+            CapabilityStatus::ReadOnly
         } else {
-            // DB unreadable: degraded scan from JSONL tree only.
-            caps = caps
-                .with(CapabilityTopic::Sessions, CapabilityStatus::Degraded)
-                .with(CapabilityTopic::Logs, CapabilityStatus::Degraded);
-        }
-
-        // Cleanup is always unsupported in Phase 3.
-        caps = caps.with(CapabilityTopic::Cleanup, CapabilityStatus::Unsupported);
-
-        Ok(caps)
+            CapabilityStatus::PermissionRequired
+        };
+        Ok(AgentCapabilities::build([
+            (CapabilityTopic::Sessions, status),
+            (CapabilityTopic::Projects, status),
+        ]))
     }
 
-    /// Scan one installation into a read-only snapshot.
-    ///
-    /// The scan reads `workbuddy.db` for session metadata (id, cwd,
-    /// title, status, deleted_at) and walks `projects/<slug>/` for
-    /// JSONL transcripts and their sidecars.
     async fn scan(
         &self,
         installation: &AgentInstallation,
-        _options: &ScanOptions,
-    ) -> Result<AgentSnapshot> {
-        let state_root = PathBuf::from(&installation.data_roots[0]);
-        let projects_dir = state_root.join("projects");
-
-        let mut sessions = Vec::new();
-        let mut resources = Vec::new();
-        let mut problems = BTreeMap::new();
-
-        // 1. Try to read sessions from DB.
-        let db_path = state_root.join("workbuddy.db");
-        let _db_sessions = if db_path.is_file() {
-            match read_db_sessions(&db_path) {
-                Ok(rows) => rows,
-                Err(e) => {
-                    problems.insert(
-                        "db-scan-failed".into(),
-                        ScanProblem::Warning {
-                            message: format!("could not read workbuddy.db sessions: {e}"),
-                        },
-                    );
-                    vec![]
-                }
-            }
-        } else {
-            vec![]
-        };
-
-        // 2. Walk projects/ for JSONL transcripts.
-        if projects_dir.is_dir() {
-            let walk = fs_probe::walk_tree(&projects_dir);
-            for problem in walk.problems {
-                let fs_probe::WalkProblem::Unreadable { path, error } = problem;
-                problems.insert(
-                    format!("walk-unreadable:{}", path.display()),
-                    ScanProblem::Warning { message: error },
+        options: &ScanOptions,
+    ) -> anyhow::Result<AgentSnapshot> {
+        let root = installation
+            .data_roots
+            .first()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("WorkBuddy installation has no state root"))?;
+        let (sessions, mut resources, problems) = Self::scan_projects(&root, installation, options);
+        // Default workspaces can mix user artifacts with nested agent state.
+        // Report their footprint, but keep ownership Unknown and cleanup blocked.
+        if let Some(workspace) = installation.data_roots.get(1).map(PathBuf::from) {
+            if workspace.is_dir() {
+                let (size, _) = Self::measure(std::slice::from_ref(&workspace));
+                let facts = inspect_workspace_safety(&workspace);
+                let mut metadata = serde_json::Map::new();
+                metadata.insert(
+                    "filesystem_eligible".into(),
+                    facts.is_filesystem_eligible().into(),
                 );
-            }
-
-            // Group entries by project dir (first level under projects/).
-            let mut project_entries: BTreeMap<PathBuf, Vec<fs_probe::EntryInfo>> = BTreeMap::new();
-            for entry in walk.entries {
-                if entry.kind == fs_probe::EntryKind::Dir
-                    && entry.path.parent() == Some(&projects_dir)
-                {
-                    // Project dir itself.
-                    project_entries.entry(entry.path.clone()).or_default();
-                } else if let Some(parent) = find_project_dir(&entry.path, &projects_dir) {
-                    project_entries.entry(parent).or_default().push(entry);
-                }
-            }
-
-            // For each project dir, find JSONL transcripts and build sessions/resources.
-            for (project_dir, entries) in &project_entries {
-                let slug = project_dir
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let cwd = slug_to_cwd(&slug);
-
-                // Find JSONL files (transcripts).
-                let jsonl_files: Vec<_> = entries
-                    .iter()
-                    .filter(|e| {
-                        e.kind == fs_probe::EntryKind::File
-                            && e.path.extension().is_some_and(|ext| ext == "jsonl")
-                    })
-                    .collect();
-
-                for jsonl_entry in &jsonl_files {
-                    let path = &jsonl_entry.path;
-                    let session_id_str = path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-
-                    // Read first line to get session metadata.
-                    let (title, lifecycle, created_at, updated_at) =
-                        read_jsonl_session_meta(path).unwrap_or_default();
-
-                    // Find sidecar files for this session.
-                    let sidecar_dir = project_dir.join(&session_id_str);
-                    let mut resource_refs = Vec::new();
-
-                    // Transcript resource.
-                    let transcript_id = format!(
-                        "{}:session:{}:transcript",
-                        ProviderId::WORKBUDDY,
-                        session_id_str
-                    );
-                    resource_refs.push(agenttidy_core::ResourceRef {
-                        id: agenttidy_core::ResourceId::new(transcript_id),
-                        kind: ResourceKind::Session,
-                    });
-
-                    let mut session_size = SizeInfo {
-                        logical_bytes: jsonl_entry.logical_len,
-                        allocated_bytes: jsonl_entry.allocated_len,
-                        exclusive_bytes: Some(jsonl_entry.logical_len),
-                        shared_bytes: None,
-                        reclaimable_bytes: None,
-                        confidence: SizeConfidence::Exact,
-                    };
-
-                    // Transcript resource.
-                    resources.push(Resource {
-                        id: agenttidy_core::ResourceId::new(format!(
-                            "{}:session:{}:transcript",
-                            ProviderId::WORKBUDDY,
-                            session_id_str
-                        )),
-                        provider: ProviderId::new(ProviderId::WORKBUDDY),
-                        installation_id: installation.id.clone(),
-                        kind: ResourceKind::Session,
-                        locator: ResourceLocator::File {
-                            path: path.to_string_lossy().to_string(),
-                        },
-                        ownership: Ownership::Exclusive,
-                        managed_by: ManagedBy::Agent,
-                        size: SizeInfo::exact(jsonl_entry.logical_len),
-                        session_id: Some(SessionId::new(&session_id_str)),
-                        project: Some(ProjectRef::from_cwd(&cwd)),
-                        created_at,
-                        updated_at,
-                        dependencies: vec![],
-                        metadata: serde_json::Map::new(),
-                    });
-
-                    // Sidecar dir resource (tool-results, meta.json, etc.).
-                    if sidecar_dir.is_dir() {
-                        let sidecar_walk = fs_probe::walk_tree(&sidecar_dir);
-                        let sidecar_size = agenttidy_infrastructure::disk_usage::usage_of_entries(
-                            &sidecar_walk.entries,
-                        );
-                        if sidecar_size.logical_bytes > 0 {
-                            let sidecar_id = format!(
-                                "{}:session:{}:sidecars",
-                                ProviderId::WORKBUDDY,
-                                session_id_str
-                            );
-                            session_size.logical_bytes += sidecar_size.logical_bytes;
-                            if let Some(alloc) = sidecar_size.allocated_bytes {
-                                session_size.allocated_bytes =
-                                    Some(session_size.allocated_bytes.unwrap_or(0) + alloc);
-                            }
-                            session_size.exclusive_bytes = Some(session_size.logical_bytes);
-
-                            resource_refs.push(agenttidy_core::ResourceRef {
-                                id: agenttidy_core::ResourceId::new(sidecar_id.clone()),
-                                kind: ResourceKind::Session,
-                            });
-
-                            resources.push(Resource {
-                                id: agenttidy_core::ResourceId::new(sidecar_id),
-                                provider: ProviderId::new(ProviderId::WORKBUDDY),
-                                installation_id: installation.id.clone(),
-                                kind: ResourceKind::Session,
-                                locator: ResourceLocator::Dir {
-                                    path: sidecar_dir.to_string_lossy().to_string(),
-                                },
-                                ownership: Ownership::Exclusive,
-                                managed_by: ManagedBy::Agent,
-                                size: SizeInfo {
-                                    logical_bytes: sidecar_size.logical_bytes,
-                                    allocated_bytes: sidecar_size.allocated_bytes,
-                                    exclusive_bytes: Some(sidecar_size.logical_bytes),
-                                    shared_bytes: None,
-                                    reclaimable_bytes: None,
-                                    confidence: SizeConfidence::Exact,
-                                },
-                                session_id: Some(SessionId::new(&session_id_str)),
-                                project: Some(ProjectRef::from_cwd(&cwd)),
-                                created_at: None,
-                                updated_at: None,
-                                dependencies: vec![],
-                                metadata: serde_json::Map::new(),
-                            });
-                        }
-                    }
-
-                    // Build session.
-                    sessions.push(Session {
-                        id: SessionId::new(&session_id_str),
-                        provider: ProviderId::new(ProviderId::WORKBUDDY),
-                        installation_id: installation.id.clone(),
-                        title,
-                        project: Some(ProjectRef::from_cwd(&cwd)),
-                        created_at,
-                        updated_at,
-                        lifecycle,
-                        size: session_size,
-                        resource_refs,
-                        metadata: serde_json::Map::new(),
-                    });
-                }
-            }
-        }
-
-        // 3. Scan logs/ directory.
-        let logs_dir = state_root.join("logs");
-        if logs_dir.is_dir() {
-            let walk = fs_probe::walk_tree(&logs_dir);
-            let usage = agenttidy_infrastructure::disk_usage::usage_of_entries(&walk.entries);
-            if usage.logical_bytes > 0 {
+                metadata.insert("has_git_marker".into(), facts.has_git_marker.into());
+                metadata.insert("has_unsafe_entry".into(), facts.has_unsafe_entry.into());
+                metadata.insert(
+                    "has_unreadable_entry".into(),
+                    facts.has_unreadable_entry.into(),
+                );
                 resources.push(Resource {
-                    id: agenttidy_core::ResourceId::new(format!("{}:logs", ProviderId::WORKBUDDY)),
-                    provider: ProviderId::new(ProviderId::WORKBUDDY),
-                    installation_id: installation.id.clone(),
-                    kind: ResourceKind::Log,
-                    locator: ResourceLocator::Dir {
-                        path: logs_dir.to_string_lossy().to_string(),
-                    },
-                    ownership: Ownership::Exclusive,
-                    managed_by: ManagedBy::Agent,
-                    size: SizeInfo {
-                        logical_bytes: usage.logical_bytes,
-                        allocated_bytes: usage.allocated_bytes,
-                        exclusive_bytes: Some(usage.logical_bytes),
-                        shared_bytes: None,
-                        reclaimable_bytes: None,
-                        confidence: SizeConfidence::Exact,
-                    },
-                    session_id: None,
-                    project: None,
-                    created_at: None,
-                    updated_at: None,
-                    dependencies: vec![],
-                    metadata: serde_json::Map::new(),
-                });
-            }
-        }
-
-        // 4. Scan traces/ directory.
-        let traces_dir = state_root.join("traces");
-        if traces_dir.is_dir() {
-            let walk = fs_probe::walk_tree(&traces_dir);
-            let usage = agenttidy_infrastructure::disk_usage::usage_of_entries(&walk.entries);
-            if usage.logical_bytes > 0 {
-                resources.push(Resource {
-                    id: agenttidy_core::ResourceId::new(format!(
-                        "{}:traces",
-                        ProviderId::WORKBUDDY
+                    id: ResourceId::new(format!(
+                        "{INSTALLATION_ID}:workspace:{}",
+                        workspace.display()
                     )),
                     provider: ProviderId::new(ProviderId::WORKBUDDY),
                     installation_id: installation.id.clone(),
-                    kind: ResourceKind::Log,
+                    kind: ResourceKind::Workspace,
                     locator: ResourceLocator::Dir {
-                        path: traces_dir.to_string_lossy().to_string(),
+                        path: workspace.display().to_string(),
                     },
-                    ownership: Ownership::Exclusive,
-                    managed_by: ManagedBy::Agent,
-                    size: SizeInfo {
-                        logical_bytes: usage.logical_bytes,
-                        allocated_bytes: usage.allocated_bytes,
-                        exclusive_bytes: Some(usage.logical_bytes),
-                        shared_bytes: None,
-                        reclaimable_bytes: None,
-                        confidence: SizeConfidence::Exact,
-                    },
+                    ownership: Ownership::Unknown,
+                    managed_by: ManagedBy::User,
+                    size,
                     session_id: None,
                     project: None,
                     created_at: None,
                     updated_at: None,
                     dependencies: vec![],
-                    metadata: serde_json::Map::new(),
+                    metadata,
                 });
             }
         }
-
         Ok(AgentSnapshot {
             installation: installation.clone(),
             sessions,
             resources,
             problems,
-            completed_at: now_ms(),
+            completed_at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64,
         })
     }
-}
 
-/// Read `last-launch.json` for version info.
-fn read_version(state_root: &Path) -> Option<String> {
-    let path = state_root.join("last-launch.json");
-    let content = std::fs::read_to_string(&path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-    json.get("version")?.as_str().map(String::from)
-}
-
-/// Read session metadata from DB.
-#[allow(dead_code)]
-struct DbSessionRow {
-    id: String,
-    cwd: Option<String>,
-    title: Option<String>,
-    status: String,
-    deleted_at: Option<i64>,
-    created_at: Option<i64>,
-    updated_at: Option<i64>,
-}
-
-fn read_db_sessions(db_path: &Path) -> Result<Vec<DbSessionRow>> {
-    let db = sqlite::ReadOnlyDb::open(db_path)?;
-    let conn = db.connection();
-
-    let mut stmt = conn.prepare(
-        "SELECT id, cwd, title, status, deleted_at, created_at, updated_at FROM sessions",
-    )?;
-
-    let rows = stmt.query_map([], |row| {
-        Ok(DbSessionRow {
-            id: row.get(0)?,
-            cwd: row.get(1)?,
-            title: row.get(2)?,
-            status: row.get(3)?,
-            deleted_at: row.get(4)?,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
-        })
-    })?;
-
-    let mut result = Vec::new();
-    for row in rows {
-        result.push(row?);
+    /// Phase 6: no cleanup units. WorkBuddy's `sessions` table contract
+    /// is still unfrozen (see `docs/CHANGELOG.md` Phase 3 notes), its
+    /// session lifecycle stays `Unknown`, and automations may reference
+    /// arbitrary cwds — all of which force Blocked until a Phase 7
+    /// safety doc lands for each enabled resource type.
+    async fn build_cleanup_units(
+        &self,
+        snapshot: &AgentSnapshot,
+    ) -> anyhow::Result<Vec<CleanupUnit>> {
+        let _ = snapshot;
+        Ok(Vec::new())
     }
-    Ok(result)
-}
 
-/// Read the first line of a JSONL file to extract session metadata.
-type SessionMetaTuple = (Option<String>, SessionLifecycle, Option<u64>, Option<u64>);
-
-fn read_jsonl_session_meta(path: &Path) -> Option<SessionMetaTuple> {
-    let mut reader = jsonl::open_jsonl::<serde_json::Value>(path).ok()?;
-    match reader.next()? {
-        jsonl::JsonlEvent::Item { value, .. } => {
-            let title = value
-                .get("title")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let created_at = value.get("created_at").and_then(|v| v.as_u64());
-            let updated_at = value.get("updated_at").and_then(|v| v.as_u64());
-
-            // Determine lifecycle from status/deleted_at fields.
-            let lifecycle = if value.get("deleted_at").and_then(|v| v.as_u64()).is_some() {
-                // Soft-deleted session: treat as inactive.
-                SessionLifecycle::Inactive
-            } else if let Some(status) = value.get("status").and_then(|v| v.as_str()) {
-                match status {
-                    "completed" | "terminated" => SessionLifecycle::Inactive,
-                    "archived" => SessionLifecycle::Archived {
-                        archived_at: value.get("updated_at").and_then(|v| v.as_u64()),
-                    },
-                    "error" => SessionLifecycle::Inactive,
-                    _ => SessionLifecycle::Unknown,
-                }
-            } else {
-                SessionLifecycle::Unknown
-            };
-
-            Some((title, lifecycle, created_at, updated_at))
-        }
-        _ => None,
-    }
-}
-
-/// Decode a cwd-slug back to a path.
-///
-/// WorkBuddy slug mapping: `/` → `-` (only separator replacement).
-/// This is the inverse of the encoding described in docs/providers/workbuddy.md.
-fn slug_to_cwd(slug: &str) -> String {
-    // On Windows, slugs look like `c-Users-18712-WorkBuddy-2026`.
-    //   Original path: `c:\Users\18712\WorkBuddy\2026`
-    //   `\` → `-`; `:` is dropped (not encoded).
-    // On macOS, slugs look like `-Users-lxy-Desktop-MyProjects-AgentTidy`.
-    //   Original path: `/Users/lxy/Desktop/MyProjects/AgentTidy`
-    //   `/` → `-`.
-    //
-    // This is intentionally simple; the DB `sessions.cwd` is the source of
-    // truth. We use this only as a fallback when the DB row is missing.
-    if cfg!(windows)
-        && slug.len() > 1
-        && slug.as_bytes()[0].is_ascii_alphabetic()
-        && slug.as_bytes()[1] == b'-'
-    {
-        // Windows drive letter: `c-Users-...` → `C:\Users\...`.
-        // `:` was dropped during encoding; `\` became `-`.
-        // Restore: drive + `:\`, then replace remaining `-` with `\`.
-        let drive = (slug.as_bytes()[0] as char).to_ascii_uppercase();
-        let rest = &slug[2..];
-        format!("{}:\\{}", drive, rest.replace('-', r"\"))
-    } else {
-        // Unix: `-Users-...` → `/Users/...`
-        slug.replace('-', "/")
-    }
-}
-
-/// Find the project dir (first-level dir under projects/) for a given path.
-fn find_project_dir(path: &Path, projects_dir: &Path) -> Option<PathBuf> {
-    let relative = path.strip_prefix(projects_dir).ok()?;
-    let first_component = relative.components().next()?;
-    Some(projects_dir.join(first_component))
-}
-
-/// Current timestamp in milliseconds.
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-/// Current platform.
-fn current_platform() -> Platform {
-    if cfg!(windows) {
-        Platform::Windows
-    } else {
-        Platform::Macos
+    /// Phase 6: no units, no provider-specific preconditions.
+    async fn validate_cleanup_unit(
+        &self,
+        unit: &CleanupUnit,
+    ) -> anyhow::Result<Vec<CleanupPrecondition>> {
+        let _ = unit;
+        Ok(Vec::new())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn slug_to_cwd_windows_drive() {
-        assert_eq!(
-            slug_to_cwd("c-Users-18712-WorkBuddy-2026"),
-            r"C:\Users\18712\WorkBuddy\2026"
-        );
+    fn root() -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "agenttidy-workbuddy-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("projects/project")).unwrap();
+        root
     }
-
-    #[test]
-    fn slug_to_cwd_unix() {
-        assert_eq!(
-            slug_to_cwd("-Users-lxy-Desktop-MyProjects"),
-            "/Users/lxy/Desktop/MyProjects"
-        );
+    fn installation(root: &Path) -> AgentInstallation {
+        AgentInstallation {
+            id: INSTALLATION_ID.into(),
+            provider: ProviderId::new(ProviderId::WORKBUDDY),
+            platform: WorkBuddyAdapter::platform(),
+            version: None,
+            data_roots: vec![root.display().to_string()],
+            status: InstallationStatus::Available,
+        }
     }
-
-    #[tokio::test]
-    async fn detect_returns_empty_when_no_state_root() {
-        // This test assumes ~/.workbuddy does not exist in CI.
-        // If it does, the test still passes (detect returns 1 installation).
-        let adapter = WorkBuddyAdapter;
-        let installations = adapter.detect().await.unwrap();
-        // Either 0 or 1 installation depending on environment.
-        assert!(installations.len() <= 1);
+    #[test]
+    fn scan_collects_verified_session_file_set() {
+        let root = root();
+        let project = root.join("projects/project");
+        let id = "d493ed8f-0147-4c01-89df-b9da4b956532";
+        fs::write(project.join(format!("{id}.jsonl")), format!("{{\"type\":\"message\",\"sessionId\":\"{id}\",\"cwd\":\"/tmp/project\",\"providerData\":{{\"secret\":\"ignored\"}}}}\n")).unwrap();
+        fs::create_dir_all(project.join(id).join("tool-results")).unwrap();
+        fs::write(project.join(format!("{id}.meta.json")), "{}").unwrap();
+        let (sessions, resources, problems) =
+            WorkBuddyAdapter::scan_projects(&root, &installation(&root), &ScanOptions::default());
+        assert!(problems.is_empty());
+        assert_eq!(sessions.len(), 1);
+        assert!(matches!(sessions[0].lifecycle, SessionLifecycle::Unknown));
+        assert_eq!(resources.len(), 1);
+        fs::remove_dir_all(root).unwrap();
     }
 }

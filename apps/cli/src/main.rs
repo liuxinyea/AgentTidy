@@ -1,13 +1,102 @@
 //! `agenttidy` — CLI for AgentTidy (v0.1, design doc §15).
 //!
 //! The CLI is the core validation and diagnostics surface. It shares the
-//! same Application API as the GUI — it never implements its own business
-//! logic.
+//! Application API as the GUI and only renders its read-only results.
 
-use agenttidy_application::{create_registry, detect_all, inspect_installation, scan_installation};
-use agenttidy_core::ScanOptions;
-use anyhow::Result;
+use agenttidy_application::Application;
+use agenttidy_core::{CapabilityTopic, ScanOptions};
 use clap::{Parser, Subcommand};
+use comfy_table::{
+    modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL, Cell, Color, ContentArrangement, Table,
+};
+use serde::Serialize;
+use std::io::Write;
+
+/// Versioned machine-output contract. Human-readable output may evolve, but
+/// scripts can pin to this identifier and reject newer incompatible formats.
+const JSON_SCHEMA_VERSION: &str = "agenttidy.cli.v1";
+
+/// Common envelope for every JSON command, so consumers never need to infer
+/// a command or schema from the shape of a bare array.
+#[derive(Serialize)]
+struct JsonEnvelope<T> {
+    schema_version: &'static str,
+    command: &'static str,
+    mode: &'static str,
+    data: T,
+}
+
+fn json_output<T: Serialize>(command: &'static str, data: T) -> anyhow::Result<String> {
+    Ok(serde_json::to_string_pretty(&JsonEnvelope {
+        schema_version: JSON_SCHEMA_VERSION,
+        command,
+        mode: "read-only",
+        data,
+    })?)
+}
+
+/// Write one complete logical output line without panicking when a consumer
+/// such as `head` exits early. Broken pipes are successful CLI termination.
+fn write_stdout_line(args: std::fmt::Arguments<'_>) -> anyhow::Result<()> {
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    match writeln!(output, "{args}") {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Use the broken-pipe-safe output primitive for all user-facing lines.
+macro_rules! outputln {
+    ($($arg:tt)*) => {
+        write_stdout_line(format_args!($($arg)*))?
+    };
+}
+
+/// Build a consistent adaptive table for people using an interactive terminal.
+/// The JSON contract deliberately bypasses this renderer for automation.
+fn user_table(headers: &[&str]) -> Table {
+    // CI and redirected output have no terminal size. A bounded fallback keeps
+    // wide paths and diagnostics readable instead of producing one huge row.
+    let width = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|width| *width >= 72)
+        .unwrap_or(120);
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .apply_modifier(UTF8_ROUND_CORNERS)
+        .set_width(width)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(
+            headers
+                .iter()
+                .map(|header| Cell::new(*header).fg(Color::Cyan)),
+        );
+    table
+}
+
+/// Keep byte totals readable while preserving exact values in the JSON API.
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn status_cell(value: impl ToString, healthy: bool) -> Cell {
+    Cell::new(value).fg(if healthy { Color::Green } else { Color::Yellow })
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -24,314 +113,185 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Show providers, paths, versions, permissions, schema and capability status
-    Doctor,
-    /// Scan and show a space-usage summary
-    Scan,
-    /// List recognizable sessions
-    Sessions,
-    /// Generate (dry-run) or execute a cleanup plan
-    Clean {
-        /// Generate a plan without executing it
+    Doctor {
+        /// Emit stable diagnostic data as JSON
         #[arg(long)]
-        dry_run: bool,
+        json: bool,
+    },
+    /// Scan and show a space-usage summary
+    Scan {
+        /// Emit the stable read-only snapshot contract as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List recognizable sessions
+    Sessions {
+        /// Emit recognized sessions as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let application = Application::new();
     match cli.command {
-        Command::Doctor => cmd_doctor().await,
-        Command::Scan => cmd_scan().await,
-        Command::Sessions => cmd_sessions().await,
-        Command::Clean { dry_run } => cmd_clean(dry_run).await,
-    }
-}
-
-/// `agenttidy doctor` — show detected installations and their status.
-async fn cmd_doctor() -> Result<()> {
-    let registry = create_registry();
-    let installations = detect_all(&registry).await?;
-
-    if installations.is_empty() {
-        println!("No agent installations detected.");
-        return Ok(());
-    }
-
-    println!("Detected installations:\n");
-    for inst in &installations {
-        println!("  {} [{}]", inst.id, inst.provider);
-        println!("    Platform: {:?}", inst.platform);
-        if let Some(ref v) = inst.version {
-            println!("    Version:  {v}");
-        }
-        println!("    Status:   {:?}", inst.status);
-        println!("    Roots:");
-        for root in &inst.data_roots {
-            println!("      {root}");
-        }
-        println!();
-    }
-
-    // Inspect each installation.
-    println!("Inspection:\n");
-    for inst in &installations {
-        match inspect_installation(&registry, inst).await {
-            Ok(inspection) => {
-                println!("  {} [{}]", inst.id, inst.provider);
-                if let Some(ref v) = inspection.version {
-                    println!("    Version:        {v}");
-                }
-                if !inspection.schema_versions.is_empty() {
-                    println!(
-                        "    Schema versions: {}",
-                        inspection
-                            .schema_versions
-                            .iter()
-                            .map(|(k, v)| format!("{k}={v}"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                }
-                if !inspection.journal_modes.is_empty() {
-                    println!(
-                        "    Journal modes:  {}",
-                        inspection
-                            .journal_modes
-                            .iter()
-                            .map(|(k, v)| format!("{k}={v}"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                }
-                println!("    Agent running:  {}", inspection.agent_running);
-                if !inspection.unknown_structures.is_empty() {
-                    println!(
-                        "    Unknown:        {}",
-                        inspection.unknown_structures.join(", ")
-                    );
-                }
-                if !inspection.problems.is_empty() {
-                    println!("    Problems:");
-                    for (code, problem) in &inspection.problems {
-                        println!("      {code}: {problem:?}");
-                    }
-                }
-                println!();
+        Command::Doctor { json } => {
+            let reports = application.doctor().await?;
+            if json {
+                outputln!("{}", json_output("doctor", reports)?);
+                return Ok(());
             }
-            Err(e) => {
-                println!("  {} [{}]", inst.id, inst.provider);
-                println!("    Inspection failed: {e}");
-                println!();
+            if reports.is_empty() {
+                outputln!("No supported agent installations detected.");
             }
+            let mut table = user_table(&[
+                "Installation",
+                "Provider",
+                "Status",
+                "Running",
+                "Sessions",
+                "Projects",
+                "Archive",
+                "Diagnostics",
+            ]);
+            for report in reports {
+                let diagnostics = report.inspection.problems.len();
+                table.add_row(vec![
+                    Cell::new(&report.installation.id),
+                    Cell::new(report.installation.provider.as_str()),
+                    status_cell(
+                        format!("{:?}", report.installation.status),
+                        report.installation.is_available(),
+                    ),
+                    status_cell(
+                        if report.inspection.agent_running {
+                            "yes"
+                        } else {
+                            "no"
+                        },
+                        !report.inspection.agent_running,
+                    ),
+                    Cell::new(format!(
+                        "{:?}",
+                        report.capabilities.get(CapabilityTopic::Sessions)
+                    )),
+                    Cell::new(format!(
+                        "{:?}",
+                        report.capabilities.get(CapabilityTopic::Projects)
+                    )),
+                    Cell::new(format!(
+                        "{:?}",
+                        report.capabilities.get(CapabilityTopic::Archive)
+                    )),
+                    status_cell(diagnostics, diagnostics == 0),
+                ]);
+            }
+            if !table.is_empty() {
+                outputln!("{table}");
+            }
+            Ok(())
         }
-    }
-
-    Ok(())
-}
-
-/// `agenttidy scan` — scan all installations and show space summary.
-async fn cmd_scan() -> Result<()> {
-    let registry = create_registry();
-    let installations = detect_all(&registry).await?;
-
-    if installations.is_empty() {
-        println!("No agent installations detected.");
-        return Ok(());
-    }
-
-    let options = ScanOptions::default();
-    let mut total_logical: u64 = 0;
-    let mut total_allocated: Option<u64> = Some(0);
-    let mut total_sessions: usize = 0;
-    let mut total_resources: usize = 0;
-
-    for inst in &installations {
-        match scan_installation(&registry, inst, &options).await {
-            Ok(snapshot) => {
+        Command::Scan { json } => {
+            let snapshots = application.scan(&ScanOptions::default()).await?;
+            if json {
+                outputln!("{}", json_output("scan", snapshots)?);
+                return Ok(());
+            }
+            if snapshots.is_empty() {
+                outputln!("No available agent installations detected.");
+            }
+            let mut table = user_table(&[
+                "Installation",
+                "Sessions",
+                "Resources",
+                "Total size",
+                "Workspace footprint",
+                "Diagnostics",
+            ]);
+            for snapshot in snapshots {
                 let size = snapshot.total_size();
-                println!("{} [{}]", inst.id, inst.provider);
-                println!("  Sessions:   {}", snapshot.sessions.len());
-                println!("  Resources:  {}", snapshot.resources.len());
-                println!("  Logical:    {}", format_bytes(size.logical_bytes));
-                if let Some(alloc) = size.allocated_bytes {
-                    println!("  Allocated:  {}", format_bytes(alloc));
-                }
-                if !snapshot.problems.is_empty() {
-                    println!("  Problems:   {}", snapshot.problems.len());
-                }
-                println!();
-
-                total_logical += size.logical_bytes;
-                total_allocated = merge_opt_u64(total_allocated, size.allocated_bytes);
-                total_sessions += snapshot.sessions.len();
-                total_resources += snapshot.resources.len();
+                let workspaces: Vec<_> = snapshot
+                    .resources
+                    .iter()
+                    .filter(|resource| resource.kind == agenttidy_core::ResourceKind::Workspace)
+                    .collect();
+                let workspace_bytes = workspaces
+                    .iter()
+                    .map(|resource| resource.size.logical_bytes)
+                    .sum::<u64>();
+                let diagnostics = snapshot.problems.len();
+                table.add_row(vec![
+                    Cell::new(snapshot.installation.id),
+                    Cell::new(snapshot.sessions.len()),
+                    Cell::new(snapshot.resources.len()),
+                    Cell::new(format!(
+                        "{} ({:?})",
+                        human_bytes(size.logical_bytes),
+                        size.confidence
+                    )),
+                    Cell::new(format!(
+                        "{} / {}",
+                        workspaces.len(),
+                        human_bytes(workspace_bytes)
+                    )),
+                    status_cell(diagnostics, diagnostics == 0),
+                ]);
             }
-            Err(e) => {
-                println!("{} [{}]", inst.id, inst.provider);
-                println!("  Scan failed: {e}");
-                println!();
+            if !table.is_empty() {
+                outputln!("{table}");
             }
+            Ok(())
         }
-    }
-
-    println!("Total:");
-    println!("  Sessions:   {total_sessions}");
-    println!("  Resources:  {total_resources}");
-    println!("  Logical:    {}", format_bytes(total_logical));
-    if let Some(alloc) = total_allocated {
-        println!("  Allocated:  {}", format_bytes(alloc));
-    }
-
-    Ok(())
-}
-
-/// `agenttidy sessions` — list all recognizable sessions.
-async fn cmd_sessions() -> Result<()> {
-    let registry = create_registry();
-    let installations = detect_all(&registry).await?;
-
-    if installations.is_empty() {
-        println!("No agent installations detected.");
-        return Ok(());
-    }
-
-    let options = ScanOptions::default();
-    let mut all_sessions: Vec<(String, String, agenttidy_core::Session)> = Vec::new();
-
-    for inst in &installations {
-        match scan_installation(&registry, inst, &options).await {
-            Ok(snapshot) => {
+        Command::Sessions { json } => {
+            let snapshots = application.scan(&ScanOptions::default()).await?;
+            if json {
+                let sessions: Vec<_> = snapshots
+                    .into_iter()
+                    .flat_map(|snapshot| snapshot.sessions)
+                    .collect();
+                outputln!("{}", json_output("sessions", sessions)?);
+                return Ok(());
+            }
+            let mut table =
+                user_table(&["Installation", "Session", "Lifecycle", "Size", "Workspace"]);
+            for snapshot in snapshots {
                 for session in snapshot.sessions {
-                    all_sessions.push((inst.provider.to_string(), inst.id.clone(), session));
+                    let cwd = session
+                        .project
+                        .and_then(|project| project.cwd)
+                        .unwrap_or_else(|| "<unknown cwd>".into());
+                    table.add_row(vec![
+                        Cell::new(&snapshot.installation.id),
+                        Cell::new(session.id.as_str()),
+                        Cell::new(format!("{:?}", session.lifecycle)),
+                        Cell::new(human_bytes(session.size.logical_bytes)),
+                        Cell::new(cwd),
+                    ]);
                 }
             }
-            Err(e) => {
-                eprintln!("warning: scan failed for {}: {e}", inst.id);
+            if table.is_empty() {
+                outputln!("No recognizable sessions found.");
+            } else {
+                outputln!("{table}");
             }
+            Ok(())
         }
     }
-
-    if all_sessions.is_empty() {
-        println!("No sessions found.");
-        return Ok(());
-    }
-
-    // Sort by provider, then by updated_at (newest first).
-    all_sessions.sort_by(|a, b| {
-        a.0.cmp(&b.0).then_with(|| {
-            b.2.updated_at
-                .unwrap_or(0)
-                .cmp(&a.2.updated_at.unwrap_or(0))
-        })
-    });
-
-    println!(
-        "{:<15} {:<40} {:<10} {:<20}",
-        "PROVIDER", "SESSION", "SIZE", "PROJECT"
-    );
-    println!("{}", "-".repeat(90));
-
-    for (provider, _inst_id, session) in &all_sessions {
-        let project = session
-            .project
-            .as_ref()
-            .and_then(|p| p.cwd.as_deref())
-            .unwrap_or("-");
-        let size = format_bytes(session.size.logical_bytes);
-        let title = session.title.as_deref().unwrap_or(session.id.as_str());
-        println!("{provider:<15} {title:<40} {size:<10} {project:<20}");
-    }
-
-    Ok(())
 }
 
-/// `agenttidy clean --dry-run` — generate a plan without executing.
-async fn cmd_clean(dry_run: bool) -> Result<()> {
-    if !dry_run {
-        println!("Cleanup execution is not yet implemented (Phase 6).");
-        println!("Use --dry-run to generate a plan without executing.");
-        return Ok(());
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let registry = create_registry();
-    let installations = detect_all(&registry).await?;
-
-    if installations.is_empty() {
-        println!("No agent installations detected.");
-        return Ok(());
-    }
-
-    let options = ScanOptions::default();
-    println!("Cleanup plan (dry-run — no files will be modified):\n");
-
-    for inst in &installations {
-        match scan_installation(&registry, inst, &options).await {
-            Ok(snapshot) => {
-                let mut candidates = 0;
-                let mut reclaimable: u64 = 0;
-
-                // In Phase 3, we report sessions with deleted_at (soft-deleted)
-                // as cleanup candidates. Real cleanup-unit logic lands in Phase 6.
-                for session in &snapshot.sessions {
-                    if session.lifecycle == agenttidy_core::SessionLifecycle::Inactive {
-                        candidates += 1;
-                        reclaimable += session.size.logical_bytes;
-                    }
-                }
-
-                // Logs and caches are always candidates.
-                for resource in &snapshot.resources {
-                    match resource.kind {
-                        agenttidy_core::ResourceKind::Log | agenttidy_core::ResourceKind::Cache => {
-                            candidates += 1;
-                            reclaimable += resource.size.logical_bytes;
-                        }
-                        _ => {}
-                    }
-                }
-
-                if candidates > 0 {
-                    println!(
-                        "  {} [{}]: {} candidates, {} reclaimable",
-                        inst.id,
-                        inst.provider,
-                        candidates,
-                        format_bytes(reclaimable)
-                    );
-                }
-            }
-            Err(e) => {
-                eprintln!("  {} [{}]: scan failed: {e}", inst.id, inst.provider);
-            }
-        }
-    }
-
-    println!("\n(CleanupPlan generation and execution is Phase 6 work.)");
-    Ok(())
-}
-
-/// Format bytes into a human-readable string.
-fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-/// Merge two optional u64 values (None if either is None).
-fn merge_opt_u64(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-    match (a, b) {
-        (Some(x), Some(y)) => Some(x + y),
-        _ => None,
+    #[test]
+    fn json_envelope_has_a_versioned_read_only_contract() {
+        let value: serde_json::Value =
+            serde_json::from_str(&json_output("scan", vec!["snapshot"]).unwrap()).unwrap();
+        assert_eq!(value["schema_version"], JSON_SCHEMA_VERSION);
+        assert_eq!(value["command"], "scan");
+        assert_eq!(value["mode"], "read-only");
+        assert_eq!(value["data"][0], "snapshot");
     }
 }

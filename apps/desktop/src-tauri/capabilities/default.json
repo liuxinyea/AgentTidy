@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "AgentTidy main window. App-defined commands (doctor / scan / detect) are auto-allowed by tauri::generate_handler!, so this capability only needs to exist for the Tauri 2 build step; no plugin or core permissions are required for the read-only GUI.",
+  "windows": ["main"],
+  "permissions": []
+}

@@ -1,0 +1,42 @@
+{
+  "command": "sessions",
+  "data": [
+    {
+      "created_at": null,
+      "id": "019e927e-a8f2-7e61-8a09-4e486e1215ea",
+      "installation_id": "codex:default",
+      "lifecycle": {
+        "state": "<LIFECYCLE>"
+      },
+      "metadata": {
+        "cli_version": "0.145.0",
+        "originator": "codex_cli",
+        "source": "cli",
+        "thread_source": "user"
+      },
+      "project": {
+        "cwd": "<cwd-slug>",
+        "display_name": null
+      },
+      "provider": "codex",
+      "resource_refs": [
+        {
+          "id": "codex:default:session:019e927e-a8f2-7e61-8a09-4e486e1215ea",
+          "kind": "session"
+        }
+      ],
+      "size": {
+        "allocated_bytes": "<ALLOCATED>",
+        "confidence": "exact",
+        "exclusive_bytes": 1194,
+        "logical_bytes": 1194,
+        "reclaimable_bytes": null,
+        "shared_bytes": null
+      },
+      "title": null,
+      "updated_at": null
+    }
+  ],
+  "mode": "read-only",
+  "schema_version": "agenttidy.cli.v1"
+}

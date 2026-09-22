@@ -1,33 +1,402 @@
-//! Claude Code provider adapter (`docs/providers/claude-code.md`).
+//! Read-only Claude Code CLI provider adapter (`Start.md` §10, Phase 3).
 //!
-//! Claude Code is a CLI tool. Its data lives under `~/.claude/`:
-//! - `projects/<cwd-slug>/<uuid>.jsonl` — session transcripts (JSONL, append-only)
-//! - `projects/<cwd-slug>/<uuid>/` — per-session sidecars (subagents, etc.)
-//! - `projects/<cwd-slug>/memory/` — per-project agent memory
-//! - `file-history/<hash>@v<n>/` — file edit snapshots (content-addressed)
-//! - `shell-snapshots/` — shell env snapshots
-//! - `history.jsonl` — global prompt history
-//!
-//! Unlike WorkBuddy/Codex, Claude Code has no default workspace directory
-//! outside the state root — sessions run directly in the user's chosen cwd.
+//! This adapter recognizes only the verified CLI transcript layout under
+//! `~/.claude/projects/`. It reads compact line metadata while deliberately
+//! ignoring message bodies, and treats unknown structures as diagnostics. The
+//! separate Windows Claude Desktop VM installation is discovered later; its
+//! credentials and VM images are outside this adapter's scan scope.
 
 use agenttidy_core::{
     AgentCapabilities, AgentInstallation, AgentSnapshot, CapabilityStatus, CapabilityTopic,
-    InstallationStatus, ManagedBy, Ownership, Platform, ProjectRef, ProviderId, Resource,
-    ResourceKind, ResourceLocator, ScanOptions, ScanProblem, Session, SessionId, SessionLifecycle,
-    SizeConfidence, SizeInfo,
+    CleanupPrecondition, CleanupUnit, InstallationStatus, ManagedBy, Ownership, Platform,
+    ProjectRef, ProviderId, Resource, ResourceId, ResourceKind, ResourceLocator, ResourceRef,
+    ScanOptions, ScanProblem, Session, SessionId, SessionLifecycle, SizeConfidence, SizeInfo,
 };
-use agenttidy_infrastructure::{disk_usage, fs_probe, jsonl};
+use agenttidy_infrastructure::disk_usage::UsageAccumulator;
+use agenttidy_infrastructure::fs_probe::{walk_tree, EntryKind, WalkProblem};
+use agenttidy_infrastructure::processes::{any_process_running, ProcessSignature};
 use agenttidy_provider_api::{AgentProviderAdapter, ProviderInspection};
-use anyhow::{Context, Result};
-use std::collections::BTreeMap;
+use serde::Deserialize;
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Well-known relative path under the user's home directory.
-const STATE_DIR: &str = ".claude";
+const INSTALLATION_ID: &str = "claude-code:cli";
 
-/// The Claude Code provider adapter.
+/// Read-only adapter for the standalone Claude Code CLI installation.
+#[derive(Debug, Default)]
 pub struct ClaudeCodeAdapter;
+
+impl ClaudeCodeAdapter {
+    fn home_dir() -> Option<PathBuf> {
+        #[cfg(windows)]
+        {
+            std::env::var_os("USERPROFILE").map(PathBuf::from)
+        }
+        #[cfg(not(windows))]
+        {
+            std::env::var_os("HOME").map(PathBuf::from)
+        }
+    }
+
+    fn platform() -> Platform {
+        #[cfg(windows)]
+        {
+            Platform::Windows
+        }
+        #[cfg(not(windows))]
+        {
+            Platform::Macos
+        }
+    }
+
+    fn root(home: &Path) -> PathBuf {
+        home.join(".claude")
+    }
+
+    fn running() -> bool {
+        // Presence is only a conservative active-data signal (§16.2), never
+        // permission to mutate a transcript.
+        any_process_running(&[ProcessSignature::new(&["claude", "claude-code"], &[])])
+    }
+
+    fn is_readable_dir(path: &Path) -> bool {
+        fs::read_dir(path).is_ok()
+    }
+
+    fn scan_projects(
+        root: &Path,
+        installation: &AgentInstallation,
+        active: bool,
+        options: &ScanOptions,
+    ) -> (Vec<Session>, Vec<Resource>, BTreeMap<String, ScanProblem>) {
+        let mut sessions = Vec::new();
+        let mut resources = Vec::new();
+        let mut problems = BTreeMap::new();
+        let mut seen_paths = HashSet::new();
+        let projects = root.join("projects");
+        if !projects.is_dir() {
+            problems.insert(
+                "projects-missing".into(),
+                ScanProblem::Warning {
+                    message: "projects directory missing; no CLI sessions found".into(),
+                },
+            );
+            return (sessions, resources, problems);
+        }
+
+        let project_dirs = match fs::read_dir(&projects) {
+            Ok(entries) => entries,
+            Err(error) => {
+                problems.insert(
+                    "projects-unreadable".into(),
+                    ScanProblem::Error {
+                        message: error.to_string(),
+                        path: Some(projects.display().to_string()),
+                    },
+                );
+                return (sessions, resources, problems);
+            }
+        };
+        for project_dir in project_dirs.flatten() {
+            let path = project_dir.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                problems.insert(
+                    format!("project-unreadable:{}", path.display()),
+                    ScanProblem::Error {
+                        message: "cannot stat project directory".into(),
+                        path: Some(path.display().to_string()),
+                    },
+                );
+                continue;
+            };
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                continue;
+            }
+            let outcome = walk_tree(&path);
+            for problem in outcome.problems {
+                let WalkProblem::Unreadable { path, error } = problem;
+                problems.insert(
+                    format!("unreadable:{}", path.display()),
+                    ScanProblem::Error {
+                        message: error,
+                        path: Some(path.display().to_string()),
+                    },
+                );
+            }
+            for entry in outcome.entries {
+                let is_direct_transcript = entry.kind == EntryKind::File
+                    && entry.path.extension().and_then(|part| part.to_str()) == Some("jsonl")
+                    && entry
+                        .path
+                        .strip_prefix(&path)
+                        .ok()
+                        .is_some_and(|relative| relative.components().count() == 1);
+                if !is_direct_transcript || !seen_paths.insert(entry.path.clone()) {
+                    continue;
+                }
+                Self::record_session(
+                    &entry.path,
+                    &path,
+                    installation,
+                    active,
+                    options,
+                    &mut sessions,
+                    &mut resources,
+                    &mut problems,
+                );
+            }
+        }
+        (sessions, resources, problems)
+    }
+
+    /// Desktop mirrors CLI transcripts below per-session `.claude` roots.
+    /// Only those verified transcript trees are scanned; the surrounding VM,
+    /// credentials, audit logs and user outputs remain entirely out of scope.
+    fn scan_desktop_projects(
+        root: &Path,
+        installation: &AgentInstallation,
+        options: &ScanOptions,
+    ) -> (Vec<Session>, Vec<Resource>, BTreeMap<String, ScanProblem>) {
+        let mut sessions = Vec::new();
+        let mut resources = Vec::new();
+        let mut problems = BTreeMap::new();
+        let sessions_root = root.join("local-agent-mode-sessions");
+        if !sessions_root.is_dir() {
+            problems.insert(
+                "desktop-sessions-missing".into(),
+                ScanProblem::Warning {
+                    message: "Claude Desktop has no local-agent-mode sessions".into(),
+                },
+            );
+            return (sessions, resources, problems);
+        }
+        for entry in walk_tree(&sessions_root).entries {
+            if entry.kind != EntryKind::Dir
+                || entry.path.file_name().and_then(|name| name.to_str()) != Some(".claude")
+            {
+                continue;
+            }
+            let (found_sessions, found_resources, found_problems) =
+                Self::scan_projects(&entry.path, installation, Self::running(), options);
+            sessions.extend(found_sessions);
+            resources.extend(found_resources);
+            problems.extend(found_problems);
+        }
+        (sessions, resources, problems)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_session(
+        transcript: &Path,
+        project_dir: &Path,
+        installation: &AgentInstallation,
+        active: bool,
+        options: &ScanOptions,
+        sessions: &mut Vec<Session>,
+        resources: &mut Vec<Resource>,
+        problems: &mut BTreeMap<String, ScanProblem>,
+    ) {
+        let meta = match Self::first_line_metadata(transcript) {
+            Ok(meta) => meta,
+            Err(error) => {
+                Self::record_unknown(
+                    transcript,
+                    installation,
+                    options,
+                    resources,
+                    problems,
+                    error,
+                );
+                return;
+            }
+        };
+        let Some(id) = meta.session_id else {
+            Self::record_unknown(
+                transcript,
+                installation,
+                options,
+                resources,
+                problems,
+                "transcript metadata has no sessionId".into(),
+            );
+            return;
+        };
+        let file_id = transcript.file_stem().and_then(|value| value.to_str());
+        if file_id != Some(id.as_str()) {
+            Self::record_unknown(
+                transcript,
+                installation,
+                options,
+                resources,
+                problems,
+                "sessionId does not match transcript filename".into(),
+            );
+            return;
+        }
+
+        let side_dir = project_dir.join(&id);
+        let mut paths = vec![transcript.to_path_buf()];
+        if side_dir.is_dir() {
+            paths.push(side_dir);
+        }
+        let (size, measurement_problems) = Self::measure_unit(&paths);
+        for (key, problem) in measurement_problems {
+            problems.insert(key, problem);
+        }
+        let session_id = SessionId::new(id.clone());
+        let resource_id = ResourceId::new(format!(
+            "{INSTALLATION_ID}:session:{}:{}",
+            project_dir.display(),
+            id
+        ));
+        let project = meta.cwd.map(ProjectRef::from_cwd);
+        let lifecycle = if active {
+            // A global Claude process cannot identify the writer's session;
+            // Unknown prevents later policy from treating it as inactive.
+            SessionLifecycle::Unknown
+        } else {
+            SessionLifecycle::Inactive
+        };
+        let mut metadata = serde_json::Map::new();
+        if let Some(version) = meta.version {
+            metadata.insert("version".into(), serde_json::Value::String(version));
+        }
+        resources.push(Resource {
+            id: resource_id.clone(),
+            provider: ProviderId::new(ProviderId::CLAUDE_CODE),
+            installation_id: installation.id.clone(),
+            kind: ResourceKind::Session,
+            locator: ResourceLocator::FileSet {
+                paths: paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
+            },
+            ownership: Ownership::Exclusive,
+            managed_by: ManagedBy::Agent,
+            size,
+            session_id: Some(session_id.clone()),
+            project: project.clone(),
+            created_at: None,
+            updated_at: None,
+            dependencies: vec![],
+            metadata: serde_json::Map::new(),
+        });
+        sessions.push(Session {
+            id: session_id,
+            provider: ProviderId::new(ProviderId::CLAUDE_CODE),
+            installation_id: installation.id.clone(),
+            title: None,
+            project,
+            created_at: None,
+            updated_at: None,
+            lifecycle,
+            size,
+            resource_refs: vec![ResourceRef {
+                id: resource_id,
+                kind: ResourceKind::Session,
+            }],
+            metadata,
+        });
+    }
+
+    fn first_line_metadata(path: &Path) -> Result<ClaudeLine, String> {
+        let file = fs::File::open(path).map_err(|error| error.to_string())?;
+        let line = BufReader::new(file)
+            .lines()
+            .next()
+            .ok_or_else(|| "empty transcript".to_string())?
+            .map_err(|error| error.to_string())?;
+        // `ClaudeLine` deliberately declares no message/content field: serde
+        // skips those bodies while extracting only schema metadata.
+        serde_json::from_str(&line).map_err(|error| error.to_string())
+    }
+
+    fn measure_unit(paths: &[PathBuf]) -> (SizeInfo, BTreeMap<String, ScanProblem>) {
+        let mut usage = UsageAccumulator::new();
+        let mut problems = BTreeMap::new();
+        for path in paths {
+            let outcome = walk_tree(path);
+            for problem in outcome.problems {
+                let WalkProblem::Unreadable { path, error } = problem;
+                problems.insert(
+                    format!("unreadable:{}", path.display()),
+                    ScanProblem::Error {
+                        message: error,
+                        path: Some(path.display().to_string()),
+                    },
+                );
+            }
+            for entry in outcome
+                .entries
+                .iter()
+                .filter(|entry| entry.kind == EntryKind::File)
+            {
+                usage.add_file(entry);
+            }
+        }
+        let usage = usage.finish();
+        let confidence = if usage.unidentifiable_files == 0 {
+            SizeConfidence::Exact
+        } else {
+            SizeConfidence::Estimated
+        };
+        (
+            SizeInfo {
+                logical_bytes: usage.logical_bytes,
+                allocated_bytes: usage.allocated_bytes,
+                exclusive_bytes: Some(usage.logical_bytes),
+                confidence,
+                ..SizeInfo::default()
+            },
+            problems,
+        )
+    }
+
+    fn record_unknown(
+        transcript: &Path,
+        installation: &AgentInstallation,
+        options: &ScanOptions,
+        resources: &mut Vec<Resource>,
+        problems: &mut BTreeMap<String, ScanProblem>,
+        reason: String,
+    ) {
+        let path = transcript.display().to_string();
+        problems.insert(
+            format!("unrecognized-transcript:{path}"),
+            ScanProblem::Warning { message: reason },
+        );
+        if options.include_unknown {
+            resources.push(Resource {
+                id: ResourceId::new(format!("{INSTALLATION_ID}:unknown:{path}")),
+                provider: ProviderId::new(ProviderId::CLAUDE_CODE),
+                installation_id: installation.id.clone(),
+                kind: ResourceKind::Unknown,
+                locator: ResourceLocator::File { path },
+                ownership: Ownership::Unknown,
+                managed_by: ManagedBy::Agent,
+                size: SizeInfo::unknown(),
+                session_id: None,
+                project: None,
+                created_at: None,
+                updated_at: None,
+                dependencies: vec![],
+                metadata: serde_json::Map::new(),
+            });
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeLine {
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    cwd: Option<String>,
+    version: Option<String>,
+}
 
 #[async_trait::async_trait]
 impl AgentProviderAdapter for ClaudeCodeAdapter {
@@ -39,542 +408,224 @@ impl AgentProviderAdapter for ClaudeCodeAdapter {
         "Claude Code"
     }
 
-    /// Find all Claude Code installations on this machine.
-    ///
-    /// Checks `~/.claude/` (state root). Unlike WorkBuddy, there is
-    /// no default workspace directory outside the state root.
-    async fn detect(&self) -> Result<Vec<AgentInstallation>> {
-        let home = dirs::home_dir().context("no home directory")?;
-        let state_root = home.join(STATE_DIR);
-
-        if !state_root.is_dir() {
+    async fn detect(&self) -> anyhow::Result<Vec<AgentInstallation>> {
+        let Some(home) = Self::home_dir() else {
             return Ok(vec![]);
+        };
+        let root = Self::root(&home);
+        let mut installations = Vec::new();
+        if root.exists() {
+            installations.push(AgentInstallation {
+                id: INSTALLATION_ID.into(),
+                provider: self.id(),
+                platform: Self::platform(),
+                version: None,
+                data_roots: vec![root.display().to_string()],
+                status: if Self::is_readable_dir(&root) {
+                    InstallationStatus::Available
+                } else {
+                    InstallationStatus::PermissionRequired
+                },
+            });
         }
-
-        let version = read_version(&state_root);
-
-        Ok(vec![AgentInstallation {
-            id: format!("{}:default", ProviderId::CLAUDE_CODE),
-            provider: ProviderId::new(ProviderId::CLAUDE_CODE),
-            platform: current_platform(),
-            version,
-            data_roots: vec![state_root.to_string_lossy().to_string()],
-            status: InstallationStatus::Available,
-        }])
-    }
-
-    /// Pre-scan inspection: version, schema versions, running state.
-    async fn inspect(&self, installation: &AgentInstallation) -> Result<ProviderInspection> {
-        let state_root = PathBuf::from(&installation.data_roots[0]);
-
-        let version = read_version(&state_root);
-        let mut schema_versions = BTreeMap::new();
-        let journal_modes = BTreeMap::new();
-        let mut unknown_structures = Vec::new();
-        let problems = BTreeMap::new();
-
-        // Claude Code uses JSONL only, no SQLite.
-        // Schema version is implicit (line types).
-        schema_versions.insert("jsonl".into(), "1".into());
-
-        // Check for unknown directories.
-        let known_dirs = [
-            "projects",
-            "file-history",
-            "shell-snapshots",
-            "session-env",
-            "plans",
-            "tasks",
-            "backups",
-            "cache",
-            "paste-cache",
-            "debug",
-            "downloads",
-            "ide",
-            "daemon",
-            "jobs",
-            "skills",
-            "plugins",
-            "agents",
-            "todo",
-        ];
-        if let Ok(entries) = std::fs::read_dir(&state_root) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if entry.path().is_dir() && !known_dirs.contains(&name.as_str()) {
-                    unknown_structures.push(format!("{}/", name));
-                }
+        #[cfg(windows)]
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let desktop_root = PathBuf::from(local_app_data).join("Claude-3p");
+            if desktop_root.exists() {
+                installations.push(AgentInstallation {
+                    id: "claude-code:desktop".into(),
+                    provider: self.id(),
+                    platform: Platform::Windows,
+                    version: None,
+                    data_roots: vec![desktop_root.display().to_string()],
+                    status: if Self::is_readable_dir(&desktop_root) {
+                        InstallationStatus::Available
+                    } else {
+                        InstallationStatus::PermissionRequired
+                    },
+                });
             }
         }
+        Ok(installations)
+    }
 
-        let mut readable_roots = BTreeMap::new();
-        readable_roots.insert(state_root.to_string_lossy().to_string(), true);
-
+    async fn inspect(
+        &self,
+        installation: &AgentInstallation,
+    ) -> anyhow::Result<ProviderInspection> {
+        let readable_roots = installation
+            .data_roots
+            .iter()
+            .map(|root| (root.clone(), Self::is_readable_dir(Path::new(root))))
+            .collect();
         Ok(ProviderInspection {
-            version,
-            schema_versions,
-            journal_modes,
-            agent_running: false,
+            version: installation.version.clone(),
+            schema_versions: BTreeMap::new(),
+            journal_modes: BTreeMap::new(),
+            agent_running: Self::running(),
             readable_roots,
-            unknown_structures,
-            problems,
+            unknown_structures: vec![],
+            problems: BTreeMap::new(),
         })
     }
 
-    /// Derive capabilities from the inspection result.
-    async fn capabilities(&self, _inspection: &ProviderInspection) -> Result<AgentCapabilities> {
-        let mut caps = AgentCapabilities::empty();
-        caps = caps
-            .with(CapabilityTopic::Sessions, CapabilityStatus::Supported)
-            .with(CapabilityTopic::Projects, CapabilityStatus::Supported)
-            .with(CapabilityTopic::Logs, CapabilityStatus::Supported)
-            .with(CapabilityTopic::Cleanup, CapabilityStatus::Unsupported);
-        Ok(caps)
+    async fn capabilities(
+        &self,
+        inspection: &ProviderInspection,
+    ) -> anyhow::Result<AgentCapabilities> {
+        let readable = !inspection.readable_roots.is_empty()
+            && inspection.readable_roots.values().all(|readable| *readable);
+        let status = if readable {
+            CapabilityStatus::ReadOnly
+        } else {
+            CapabilityStatus::PermissionRequired
+        };
+        Ok(AgentCapabilities::build([
+            (CapabilityTopic::Sessions, status),
+            (CapabilityTopic::Projects, status),
+        ]))
     }
 
-    /// Scan one installation into a read-only snapshot.
-    ///
-    /// Walks `projects/<slug>/` for JSONL transcripts and their
-    /// sidecars (subagents, memory, etc.).
     async fn scan(
         &self,
         installation: &AgentInstallation,
-        _options: &ScanOptions,
-    ) -> Result<AgentSnapshot> {
-        let state_root = PathBuf::from(&installation.data_roots[0]);
-        let projects_dir = state_root.join("projects");
-
-        let mut sessions = Vec::new();
-        let mut resources = Vec::new();
-        let mut problems = BTreeMap::new();
-
-        if projects_dir.is_dir() {
-            let walk = fs_probe::walk_tree(&projects_dir);
-            for problem in walk.problems {
-                let fs_probe::WalkProblem::Unreadable { path, error } = problem;
-                problems.insert(
-                    format!("walk-unreadable:{}", path.display()),
-                    ScanProblem::Warning { message: error },
-                );
-            }
-
-            // Group entries by project dir (first level under projects/).
-            let mut project_entries: BTreeMap<PathBuf, Vec<fs_probe::EntryInfo>> = BTreeMap::new();
-            for entry in walk.entries {
-                if entry.kind == fs_probe::EntryKind::Dir
-                    && entry.path.parent() == Some(&projects_dir)
-                {
-                    project_entries.entry(entry.path.clone()).or_default();
-                } else if let Some(parent) = find_project_dir(&entry.path, &projects_dir) {
-                    project_entries.entry(parent).or_default().push(entry);
-                }
-            }
-
-            // For each project dir, find JSONL transcripts.
-            for (project_dir, entries) in &project_entries {
-                let slug = project_dir
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let cwd = slug_to_cwd(&slug);
-
-                // Find JSONL files (transcripts).
-                let jsonl_files: Vec<_> = entries
-                    .iter()
-                    .filter(|e| {
-                        e.kind == fs_probe::EntryKind::File
-                            && e.path.extension().is_some_and(|ext| ext == "jsonl")
-                            && !e.path.to_string_lossy().contains("subagents")
-                    })
-                    .collect();
-
-                for jsonl_entry in &jsonl_files {
-                    let path = &jsonl_entry.path;
-                    let session_id_str = path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-
-                    // Read first line to get session metadata.
-                    let (title, lifecycle, created_at, updated_at, version) =
-                        read_jsonl_session_meta(path).unwrap_or_default();
-
-                    // Find sidecar files for this session.
-                    let sidecar_dir = project_dir.join(&session_id_str);
-                    let mut resource_refs = Vec::new();
-
-                    // Transcript resource.
-                    let transcript_id = format!(
-                        "{}:session:{}:transcript",
-                        ProviderId::CLAUDE_CODE,
-                        session_id_str
-                    );
-                    resource_refs.push(agenttidy_core::ResourceRef {
-                        id: agenttidy_core::ResourceId::new(transcript_id),
-                        kind: ResourceKind::Session,
-                    });
-
-                    let mut session_size = SizeInfo {
-                        logical_bytes: jsonl_entry.logical_len,
-                        allocated_bytes: jsonl_entry.allocated_len,
-                        exclusive_bytes: Some(jsonl_entry.logical_len),
-                        shared_bytes: None,
-                        reclaimable_bytes: None,
-                        confidence: SizeConfidence::Exact,
-                    };
-
-                    // Transcript resource.
-                    resources.push(Resource {
-                        id: agenttidy_core::ResourceId::new(format!(
-                            "{}:session:{}:transcript",
-                            ProviderId::CLAUDE_CODE,
-                            session_id_str
-                        )),
-                        provider: ProviderId::new(ProviderId::CLAUDE_CODE),
-                        installation_id: installation.id.clone(),
-                        kind: ResourceKind::Session,
-                        locator: ResourceLocator::File {
-                            path: path.to_string_lossy().to_string(),
-                        },
-                        ownership: Ownership::Exclusive,
-                        managed_by: ManagedBy::Agent,
-                        size: SizeInfo::exact(jsonl_entry.logical_len),
-                        session_id: Some(SessionId::new(&session_id_str)),
-                        project: Some(ProjectRef::from_cwd(&cwd)),
-                        created_at,
-                        updated_at,
-                        dependencies: vec![],
-                        metadata: serde_json::Map::new(),
-                    });
-
-                    // Sidecar dir resource (subagents, etc.).
-                    if sidecar_dir.is_dir() {
-                        let sidecar_walk = fs_probe::walk_tree(&sidecar_dir);
-                        let sidecar_usage = disk_usage::usage_of_entries(&sidecar_walk.entries);
-                        if sidecar_usage.logical_bytes > 0 {
-                            let sidecar_id = format!(
-                                "{}:session:{}:sidecars",
-                                ProviderId::CLAUDE_CODE,
-                                session_id_str
-                            );
-                            session_size.logical_bytes += sidecar_usage.logical_bytes;
-                            if let Some(alloc) = sidecar_usage.allocated_bytes {
-                                session_size.allocated_bytes =
-                                    Some(session_size.allocated_bytes.unwrap_or(0) + alloc);
-                            }
-                            session_size.exclusive_bytes = Some(session_size.logical_bytes);
-
-                            resource_refs.push(agenttidy_core::ResourceRef {
-                                id: agenttidy_core::ResourceId::new(sidecar_id.clone()),
-                                kind: ResourceKind::Session,
-                            });
-
-                            resources.push(Resource {
-                                id: agenttidy_core::ResourceId::new(sidecar_id),
-                                provider: ProviderId::new(ProviderId::CLAUDE_CODE),
-                                installation_id: installation.id.clone(),
-                                kind: ResourceKind::Session,
-                                locator: ResourceLocator::Dir {
-                                    path: sidecar_dir.to_string_lossy().to_string(),
-                                },
-                                ownership: Ownership::Exclusive,
-                                managed_by: ManagedBy::Agent,
-                                size: SizeInfo {
-                                    logical_bytes: sidecar_usage.logical_bytes,
-                                    allocated_bytes: sidecar_usage.allocated_bytes,
-                                    exclusive_bytes: Some(sidecar_usage.logical_bytes),
-                                    shared_bytes: None,
-                                    reclaimable_bytes: None,
-                                    confidence: SizeConfidence::Exact,
-                                },
-                                session_id: Some(SessionId::new(&session_id_str)),
-                                project: Some(ProjectRef::from_cwd(&cwd)),
-                                created_at: None,
-                                updated_at: None,
-                                dependencies: vec![],
-                                metadata: serde_json::Map::new(),
-                            });
-                        }
-                    }
-
-                    // Build session.
-                    let mut metadata = serde_json::Map::new();
-                    if let Some(v) = version {
-                        metadata.insert("cli_version".into(), serde_json::Value::String(v));
-                    }
-
-                    sessions.push(Session {
-                        id: SessionId::new(&session_id_str),
-                        provider: ProviderId::new(ProviderId::CLAUDE_CODE),
-                        installation_id: installation.id.clone(),
-                        title,
-                        project: Some(ProjectRef::from_cwd(&cwd)),
-                        created_at,
-                        updated_at,
-                        lifecycle,
-                        size: session_size,
-                        resource_refs,
-                        metadata,
-                    });
-                }
-            }
-        }
-
-        // Scan file-history/ (shared, content-addressed).
-        let file_history_dir = state_root.join("file-history");
-        if file_history_dir.is_dir() {
-            let walk = fs_probe::walk_tree(&file_history_dir);
-            let usage = disk_usage::usage_of_entries(&walk.entries);
-            if usage.logical_bytes > 0 {
-                resources.push(Resource {
-                    id: agenttidy_core::ResourceId::new(format!(
-                        "{}:file-history",
-                        ProviderId::CLAUDE_CODE
-                    )),
-                    provider: ProviderId::new(ProviderId::CLAUDE_CODE),
-                    installation_id: installation.id.clone(),
-                    kind: ResourceKind::Checkpoint,
-                    locator: ResourceLocator::Dir {
-                        path: file_history_dir.to_string_lossy().to_string(),
-                    },
-                    ownership: Ownership::Shared,
-                    managed_by: ManagedBy::Agent,
-                    size: SizeInfo {
-                        logical_bytes: usage.logical_bytes,
-                        allocated_bytes: usage.allocated_bytes,
-                        exclusive_bytes: None,
-                        shared_bytes: Some(usage.logical_bytes),
-                        reclaimable_bytes: None,
-                        confidence: SizeConfidence::Exact,
-                    },
-                    session_id: None,
-                    project: None,
-                    created_at: None,
-                    updated_at: None,
-                    dependencies: vec![],
-                    metadata: serde_json::Map::new(),
-                });
-            }
-        }
-
-        // Scan shell-snapshots/ (cache).
-        let shell_snapshots_dir = state_root.join("shell-snapshots");
-        if shell_snapshots_dir.is_dir() {
-            let walk = fs_probe::walk_tree(&shell_snapshots_dir);
-            let usage = disk_usage::usage_of_entries(&walk.entries);
-            if usage.logical_bytes > 0 {
-                resources.push(Resource {
-                    id: agenttidy_core::ResourceId::new(format!(
-                        "{}:shell-snapshots",
-                        ProviderId::CLAUDE_CODE
-                    )),
-                    provider: ProviderId::new(ProviderId::CLAUDE_CODE),
-                    installation_id: installation.id.clone(),
-                    kind: ResourceKind::Cache,
-                    locator: ResourceLocator::Dir {
-                        path: shell_snapshots_dir.to_string_lossy().to_string(),
-                    },
-                    ownership: Ownership::Exclusive,
-                    managed_by: ManagedBy::Agent,
-                    size: SizeInfo {
-                        logical_bytes: usage.logical_bytes,
-                        allocated_bytes: usage.allocated_bytes,
-                        exclusive_bytes: Some(usage.logical_bytes),
-                        shared_bytes: None,
-                        reclaimable_bytes: None,
-                        confidence: SizeConfidence::Exact,
-                    },
-                    session_id: None,
-                    project: None,
-                    created_at: None,
-                    updated_at: None,
-                    dependencies: vec![],
-                    metadata: serde_json::Map::new(),
-                });
-            }
-        }
-
+        options: &ScanOptions,
+    ) -> anyhow::Result<AgentSnapshot> {
+        let root = installation
+            .data_roots
+            .first()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("Claude Code installation has no state root"))?;
+        let (sessions, resources, problems) = if installation.id == "claude-code:desktop" {
+            Self::scan_desktop_projects(&root, installation, options)
+        } else {
+            Self::scan_projects(&root, installation, Self::running(), options)
+        };
         Ok(AgentSnapshot {
             installation: installation.clone(),
             sessions,
             resources,
             problems,
-            completed_at: now_ms(),
+            completed_at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64,
         })
     }
-}
 
-/// Read version from `config.json` or `.last-update-result.json`.
-fn read_version(state_root: &Path) -> Option<String> {
-    // Try config.json first.
-    let config_path = state_root.join("config.json");
-    if let Ok(content) = std::fs::read_to_string(&config_path) {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(version) = json.get("version").and_then(|v| v.as_str()) {
-                return Some(version.to_string());
-            }
-        }
+    /// Phase 6: no cleanup units yet. Claude Code transcripts + sidecar
+    /// dirs stay report-only until the Phase 7 provider beta wires the
+    /// `FileSet` unit shape (`*.jsonl` + same-named side directory as one
+    /// atomic unit) with its safety doc. The Windows Desktop VM-mirror
+    /// installation stays out of scope entirely (`Start.md` §2.3).
+    async fn build_cleanup_units(
+        &self,
+        snapshot: &AgentSnapshot,
+    ) -> anyhow::Result<Vec<CleanupUnit>> {
+        let _ = snapshot;
+        Ok(Vec::new())
     }
 
-    // Fallback: .last-update-result.json
-    let update_path = state_root.join(".last-update-result.json");
-    if let Ok(content) = std::fs::read_to_string(&update_path) {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(version) = json.get("version").and_then(|v| v.as_str()) {
-                return Some(version.to_string());
-            }
-        }
-    }
-
-    None
-}
-
-/// Read the first line of a JSONL file to extract session metadata.
-type SessionMetaTuple = (
-    Option<String>,
-    SessionLifecycle,
-    Option<u64>,
-    Option<u64>,
-    Option<String>,
-);
-
-fn read_jsonl_session_meta(path: &Path) -> Option<SessionMetaTuple> {
-    let mut reader = jsonl::open_jsonl::<serde_json::Value>(path).ok()?;
-    match reader.next()? {
-        jsonl::JsonlEvent::Item { value, .. } => {
-            let title = value
-                .get("title")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let created_at = value
-                .get("timestamp")
-                .and_then(|v| v.as_str())
-                .and_then(parse_iso8601_ms);
-            let updated_at = created_at; // First line timestamp is creation time.
-            let version = value
-                .get("version")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-
-            // Claude Code has no archive concept; all sessions are inactive or unknown.
-            let lifecycle = SessionLifecycle::Unknown;
-
-            Some((title, lifecycle, created_at, updated_at, version))
-        }
-        _ => None,
-    }
-}
-
-/// Parse ISO 8601 timestamp to milliseconds since epoch.
-fn parse_iso8601_ms(s: &str) -> Option<u64> {
-    // Simple parser for "2026-09-15T10:00:00.000Z" format.
-    // This is intentionally minimal; a full ISO parser would be overkill.
-    if s.len() < 20 {
-        return None;
-    }
-    let date_part = &s[..10];
-    let time_part = &s[11..19];
-
-    let year: u64 = date_part[..4].parse().ok()?;
-    let month: u64 = date_part[5..7].parse().ok()?;
-    let day: u64 = date_part[8..10].parse().ok()?;
-    let hour: u64 = time_part[..2].parse().ok()?;
-    let minute: u64 = time_part[3..5].parse().ok()?;
-    let second: u64 = time_part[6..8].parse().ok()?;
-
-    // Days since Unix epoch (1970-01-01).
-    let days = (year - 1970) * 365 + (month - 1) * 30 + (day - 1); // Simplified.
-    let seconds = days * 86400 + hour * 3600 + minute * 60 + second;
-
-    // Add milliseconds if present.
-    let ms = if s.len() > 20 && s.as_bytes()[19] == b'.' {
-        let ms_str = &s[20..23];
-        ms_str.parse::<u64>().unwrap_or(0)
-    } else {
-        0
-    };
-
-    Some(seconds * 1000 + ms)
-}
-
-/// Decode a cwd-slug back to a path.
-///
-/// Claude Code slug mapping: `/` → `-` (only separator replacement).
-/// This is the inverse of the encoding described in docs/providers/claude-code.md.
-fn slug_to_cwd(slug: &str) -> String {
-    // On Windows, slugs look like `F--Work-AgentTidy`.
-    //   Original path: `F:\Work\AgentTidy`
-    //   `:` → `-`, `\` → `-` (all separators become `-`).
-    // On macOS, slugs look like `-Users-lxy-Desktop-MyProjects-AgentTidy`.
-    //   Original path: `/Users/lxy/Desktop/MyProjects/AgentTidy`
-    //   `/` → `-`.
-    if cfg!(windows) && slug.len() > 2 && slug.as_bytes()[1] == b'-' && slug.as_bytes()[2] == b'-' {
-        // Windows drive letter path: `F--Work-AgentTidy` → `F:\Work\AgentTidy`.
-        // Both `:` and `\` map to `-`, so replace all `-` with `\` then
-        // restore position 1 as `:`.
-        let mut out = slug.replace('-', r"\");
-        // SAFETY: we checked len > 2 and bytes 1..2 is "-", so bytes 1..2
-        // is a valid char boundary.
-        out.replace_range(1..2, ":");
-        out
-    } else {
-        // Unix: `-Users-lxy-...` → `/Users/lxy/...`
-        slug.replace('-', "/")
-    }
-}
-
-/// Find the project dir (first-level dir under projects/) for a given path.
-fn find_project_dir(path: &Path, projects_dir: &Path) -> Option<PathBuf> {
-    let relative = path.strip_prefix(projects_dir).ok()?;
-    let first_component = relative.components().next()?;
-    Some(projects_dir.join(first_component))
-}
-
-/// Current timestamp in milliseconds.
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-/// Current platform.
-fn current_platform() -> Platform {
-    if cfg!(windows) {
-        Platform::Windows
-    } else {
-        Platform::Macos
+    /// Phase 6: no units, no provider-specific preconditions.
+    async fn validate_cleanup_unit(
+        &self,
+        unit: &CleanupUnit,
+    ) -> anyhow::Result<Vec<CleanupPrecondition>> {
+        let _ = unit;
+        Ok(Vec::new())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    #[test]
-    fn slug_to_cwd_windows_drive() {
-        assert_eq!(slug_to_cwd("F--Work-AgentTidy"), r"F:\Work\AgentTidy");
+    static TEMP_ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_root() -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "agenttidy-claude-code-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            TEMP_ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir_all(root.join("projects/example-project")).unwrap();
+        root
+    }
+
+    fn installation(root: &Path) -> AgentInstallation {
+        AgentInstallation {
+            id: INSTALLATION_ID.into(),
+            provider: ProviderId::new(ProviderId::CLAUDE_CODE),
+            platform: ClaudeCodeAdapter::platform(),
+            version: None,
+            data_roots: vec![root.display().to_string()],
+            status: InstallationStatus::Available,
+        }
     }
 
     #[test]
-    fn slug_to_cwd_unix() {
+    fn scan_groups_transcript_and_side_directory_without_parsing_message_content() {
+        let root = temp_root();
+        let project = root.join("projects/example-project");
+        let id = "9521178d-ae3a-4959-b9ac-7591e7eaf5d6";
+        fs::write(
+            project.join(format!("{id}.jsonl")),
+            format!("{{\"type\":\"user\",\"sessionId\":\"{id}\",\"cwd\":\"/tmp/project\",\"version\":\"2.1.218\",\"message\":{{\"content\":\"not retained\"}}}}\n"),
+        )
+        .unwrap();
+        fs::create_dir_all(project.join(id).join("subagents")).unwrap();
+        fs::write(
+            project.join(id).join("subagents/agent-1.jsonl"),
+            "subagent body",
+        )
+        .unwrap();
+        let installation = installation(&root);
+        let (sessions, resources, problems) =
+            ClaudeCodeAdapter::scan_projects(&root, &installation, false, &ScanOptions::default());
+
+        assert!(problems.is_empty());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id.as_str(), id);
         assert_eq!(
-            slug_to_cwd("-Users-lxy-Desktop-MyProjects"),
-            "/Users/lxy/Desktop/MyProjects"
+            sessions[0].project.as_ref().unwrap().cwd.as_deref(),
+            Some("/tmp/project")
         );
+        assert_eq!(resources.len(), 1);
+        assert!(matches!(
+            resources[0].locator,
+            ResourceLocator::FileSet { .. }
+        ));
+        assert!(resources[0].size.logical_bytes > 0);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn parse_iso8601_basic() {
-        let ms = parse_iso8601_ms("2026-09-15T10:00:00.000Z");
-        assert!(ms.is_some());
-    }
+    fn mismatched_filename_is_blocked_unless_unknowns_are_requested() {
+        let root = temp_root();
+        fs::write(
+            root.join("projects/example-project/not-the-session-id.jsonl"),
+            "{\"type\":\"user\",\"sessionId\":\"actual-id\"}\n",
+        )
+        .unwrap();
+        let installation = installation(&root);
+        let (sessions, resources, problems) =
+            ClaudeCodeAdapter::scan_projects(&root, &installation, false, &ScanOptions::default());
+        assert!(sessions.is_empty());
+        assert!(resources.is_empty());
+        assert_eq!(problems.len(), 1);
 
-    #[tokio::test]
-    async fn detect_returns_empty_when_no_state_root() {
-        let adapter = ClaudeCodeAdapter;
-        let installations = adapter.detect().await.unwrap();
-        assert!(installations.len() <= 1);
+        let (_, resources, _) = ClaudeCodeAdapter::scan_projects(
+            &root,
+            &installation,
+            false,
+            &ScanOptions {
+                include_unknown: true,
+            },
+        );
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].kind, ResourceKind::Unknown);
+        fs::remove_dir_all(root).unwrap();
     }
 }

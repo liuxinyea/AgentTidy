@@ -36,10 +36,15 @@ anyhow = "1"
 # async-trait: makes AgentProviderAdapter dyn-compatible (boxed futures),
 # so the application-layer registry can hold `Box<dyn AgentProviderAdapter>`.
 async-trait = "0.1"
+# sha2: SHA-256 over the plan fingerprint tuple (Start.md §12.1 last
+# step) so the executor can reject a stale plan the user "confirms"
+# twice. Tiny dep, no native deps.
+sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
-# dirs: cross-platform user directory detection.
-dirs = "5"
+# comfy-table renders adaptive Unicode tables and ANSI status colors for the
+# human CLI surface. JSON remains the separate stable automation contract.
+comfy-table = "7"
 # Phase 2 infrastructure deps:
 # walkdir: read-only directory enumeration (follow_links=false is the default,
 # which is what §16.1 link-boundary enforcement relies on).

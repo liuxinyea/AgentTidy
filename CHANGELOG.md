@@ -9,6 +9,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Adaptive, terminal-friendly Unicode tables for the human-facing CLI output,
+  with readable byte units and status colours; `--json` remains unchanged for
+  automation.
+- Versioned JSON envelopes (`agenttidy.cli.v1`) for every CLI machine-output
+  command, including its command name and explicit `read-only` mode.
+- Pure application-level workspace preview admission checks with regression
+  coverage for the exact-session and WorkBuddy automation-reference gates;
+  this is reserved for the future GUI and deliberately not exposed by the CLI.
+- Initial Codex read-only provider adapter: detects the shared Codex state
+  root, reports inspection facts and scans rollout JSONL `session_meta`
+  records without reading transcript bodies. It reads the documented
+  `state_5.sqlite.threads` index read-only to enrich session metadata; an
+  unavailable or inconsistent index degrades diagnostics, while malformed
+  rollouts remain blocked by default.
+- Initial Claude Code CLI read-only provider adapter: discovers the verified
+  `~/.claude` root and scans only top-level project transcripts. A transcript
+  and its same-named side directory form one measured Session resource;
+  filename/session-id mismatches remain blocked by default.
+- Initial WorkBuddy read-only provider adapter: scans only the verified
+  transcript file set and reports database journal facts without querying
+  session lifecycle. Claude Desktop is discovered as a second Claude Code
+  installation and scans only embedded transcript mirrors, excluding VM,
+  credential, audit and user-output paths.
+- Phase 4 read-only application/CLI path: static registration of the three
+  providers and functional `doctor`, `scan`, and `sessions` commands. Cleanup
+  is intentionally a future GUI-only workflow, not a CLI subcommand.
+- End-to-end CLI golden baselines: 12 committed snapshots under
+  `apps/cli/tests/golden/` (3 providers × 3 commands + 3 empty-home
+  regressions) lock the `agenttidy.cli.v1` envelope against the existing
+  sanitized fixtures. Absolute paths, completion timestamps, the
+  agent-running flag, session lifecycle state and the `platform` label are
+  normalised to placeholders so a single golden set covers macOS and
+  Windows CI runners; the locked contract includes `thread-index-unavailable`
+  on Codex scans, `workbuddy-db-unavailable` on WorkBuddy inspections and
+  the four workspace-safety booleans on default-workspace resources.
+- Phase 5 GUI read-only experience: Tauri 2 IPC bridge
+  (`apps/desktop/src-tauri/src/commands.rs`) forwarding `doctor` /
+  `scan` / `detect` to `agenttidy-application`, plus a three-view React
+  shell (Overview / Sessions / Diagnostics) per Start.md §6.1/§6.2/§6.4
+  with hand-written TS types in `apps/desktop/src/types.ts` matching the
+  Rust serde shapes. Auto-scan on mount plus a manual Refresh button;
+  empty installs route to a dedicated `Empty` panel. Cleanup actions
+  (§6.3 Review & Tidy) remain a Phase 6 deliverable.
+- Phase 6 cleanup model (framework-only): typed domain vocabulary in
+  `crates/core/src/cleanup.rs` (three-level RiskLevel, CleanupUnit /
+  CleanupPlan / CleanupItem, §12.2 revalidation precondition kinds,
+  tagged CleanupLocator + §16.3 CleanupEvent); `AgentProviderAdapter`
+  gained `build_cleanup_units` / `validate_cleanup_unit` (default: empty
+  — no provider is cleanup-enabled until Phase 7); Application API
+  gained the pure `cleanup_policy_evaluate`, `cleanup_plan_from_snapshots`,
+  `cleanup_revalidate`, and fingerprint-guarded `cleanup_execute`; an
+  append-only fsynced audit log at `$HOME/.agenttidy/operations.jsonl`;
+  `agenttidy.gui.v1` IPC envelopes over three Tauri commands
+  (`cleanup_preview` / `cleanup_revalidate` / `cleanup_execute`); and the
+  GUI's Tidy tab implementing the two-confirmation flow with the Mac
+  cleaner review layout (Recommended / Caution / Off-limits badges,
+  per-provider groups, typed CONFIRM modal). `docs/safety/workspace-cleanup.md`
+  now enumerates the §12.2 revalidation triggers, the audit-log schema,
+  and the Trash vs ProviderOperation boundary. The CLI stays read-only —
+  no cleanup subcommand.
+- GUI bilingual (zh/en) internationalization: a hand-rolled i18n layer
+  (`apps/desktop/src/i18n/`) with `en.ts` as source of truth and `zh.ts`
+  typed as `Record<TranslationKey, string>` — missing/extra keys fail
+  `tsc -b`, so `pnpm build:desktop` is the catalog-completeness gate.
+  First launch detects `navigator.language`, the header carries an
+  EN / 中文 toggle persisted in `localStorage`, and `<html lang>` follows
+  the active locale. Static UI, frontend-mapped enum labels (status /
+  capability / lifecycle / risk / confidence / severity / outcome) and
+  the Phase 7 banner are fully localized; backend `ScanProblem` messages
+  map to Chinese by stable code/path-suffix with English fallback, while
+  cleanup reasons and anyhow errors stay English until Phase 7. Shared
+  `format.ts` consolidates the previously copy-pasted `humanBytes` and
+  locale-formats the three timestamp columns.
+- Documented the future default-workspace cleanup gate: exact exclusive
+  session ownership, no Git repository or shared references, OS Trash only,
+  revalidation, risk disclosure, and two independent user confirmations.
+- Added read-only accounting for the verified Codex and WorkBuddy default
+  workspace roots; CLI scan reports their footprint separately from sessions.
+- Development progress changelog at `docs/CHANGELOG.md`: a Phase 0–8
+  milestone view with current work, verification blockers and maintenance
+  conventions; README now links to it.
 - Initial project skeleton: Rust workspace (core, application, infrastructure,
   provider-api, test-support crates; workbuddy / claude-code / codex provider
   crates; `agenttidy` CLI with placeholder subcommands), Tauri 2 + React
@@ -43,6 +124,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed (Phase 1 review, installation-model alignment)
 
+- Native-trash test now skips its environment-dependent assertion when a
+  headless macOS session has no Finder service; production code still returns
+  the platform error and remains fail-closed.
 - `SessionId` doc corrected: uniqueness is per *installation*, not per
   provider — the same id may legitimately appear in both `claude-code`
   installations (Desktop mirrors CLI transcripts); dedup by
@@ -52,6 +136,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `claude-code:cli` to match it (5 occurrences).
 - Removed unused `Session::CAPABILITY_TOPIC` const and the
   keep-import-alive `unused_topic_import_is_for_docs` test.
+
+### Fixed (Windows test-environment isolation)
+
+- CLI golden baselines now redirect `LOCALAPPDATA` at the temp home: the
+  Windows Claude Desktop installation is discovered via
+  `LOCALAPPDATA/Claude-3p`, so a real machine install previously leaked
+  into every golden comparison and broke the empty-home regressions
+  outside CI.
+- Golden comparison normalises measured `allocated_bytes` to a
+  placeholder (`null` "not measured" stays verbatim): on-disk allocation
+  depends on host cluster size / NTFS compression and cannot be stable
+  across dev machines and CI runners.
+- Audit-log tests now switch the env var `paths::home_dir` actually
+  reads (`USERPROFILE` on Windows, `HOME` elsewhere) instead of `HOME`
+  alone, so they no longer write against the real user profile on
+  Windows.
 
 ### Added (Phase 1: read-only core)
 
@@ -148,67 +248,3 @@ Tests: 31 in infrastructure (31 pass on Windows). Workspace total:
 New workspace deps: `walkdir`, `rusqlite` (bundled), `trash`, `sysinfo`,
 `windows-sys` (Win32_Storage_FileSystem, Win32_Foundation, Win32_Security —
 last one gates `CreateFileW`'s `SECURITY_ATTRIBUTES` signature).
-
-### Added (Phase 3: three read-only providers)
-
-- **WorkBuddy provider** (`providers/workbuddy`): `WorkBuddyAdapter`
-  implementing `AgentProviderAdapter`. `detect` checks
-  `~/.workbuddy/` (state root) and `~/WorkBuddy/` (default workspace
-  root); `inspect` reads `last-launch.json` for version and opens
-  `workbuddy.db` for Drizzle migration schema + journal mode;
-  `capabilities` reports `Sessions`/`Projects`/`Archive`/`Logs` when
-  the DB is readable; `scan` reads `workbuddy.db.sessions` for
-  session metadata and walks `projects/<slug>/` for JSONL transcripts
-  and their sidecar dirs, plus `logs/` and `traces/` for shared
-  resources. `slug_to_cwd` implements the WorkBuddy slug→cwd inverse
-  (Windows: `:` dropped, `\` → `-`; Unix: `/` → `-`).
-- **Claude Code provider** (`providers/claude-code`): `ClaudeCodeAdapter`.
-  `detect` checks `~/.claude/`; `inspect` reads `config.json` for
-  version; `capabilities` reports `Sessions`/`Projects`/`Logs`;
-  `scan` walks `projects/<slug>/` for JSONL transcripts and sidecars
-  (subagents, etc.), plus `file-history/` (shared, content-addressed
-  checkpoints) and `shell-snapshots/` (cache). `slug_to_cwd`
-  implements the Claude Code slug→cwd inverse (Windows: both `:` and
-  `\` → `-`; Unix: `/` → `-`).
-- **Codex provider** (`providers/codex`): `CodexAdapter`. `detect`
-  checks `~/.codex/` (state root) and `~/Documents/Codex/` (default
-  workspace root); `inspect` opens `state_5.sqlite`,
-  `thread_history_1.sqlite`, `logs_2.sqlite` for schema + journal
-  mode; `capabilities` reports `Sessions`/`Projects`/`Archive`/`Logs`
-  when the state DB is readable; `scan` reads `state_5.sqlite.threads`
-  for session metadata and walks `sessions/YYYY/MM/DD/` for JSONL
-  rollouts, plus `archived_sessions/`, `logs_2.sqlite`, `cache/`.
-  Codex sessions carry `source` and `cli_version` metadata from the
-  rollout's `session_meta` payload.
-
-Provider workspace deps added: `async-trait`, `dirs` 5.
-Phase 1: `SessionLifecycle` now derives `Default` (→ `Unknown`).
-
-Tests: 3 new in workbuddy (slug + detect), 4 in claude-code (slug +
-ISO 8601 parse + detect), 3 in codex (ISO 8601 + detect). Workspace
-total: 64 tests. `cargo fmt` and `cargo clippy --workspace
---all-targets -- -D warnings` clean.
-
-### Added (Phase 4: CLI and application layer)
-
-- **Application API** (`crates/application`): `create_registry` wires
-  the three provider adapters into a `ProviderRegistry`; `detect_all`,
-  `scan_installation`, `inspect_installation`, `capabilities_for`
-  forward to the adapter trait. The crate is the single stable entry
-  point shared by GUI and CLI (§13) — neither bypasses it.
-- **CLI** (`apps/cli`): four subcommands wired through the Application
-  API (§15):
-  * `agenttidy doctor` — lists detected installations with version,
-    status, data roots, and per-installation inspection (schema
-    versions, journal modes, unknown structures, problems).
-  * `agenttidy scan` — scans all installations and prints per-provider
-    and total session/resource/logical-bytes summary.
-  * `agenttidy sessions` — lists all sessions across providers with
-    provider, title/ID, size, and cwd/project.
-  * `agenttidy clean --dry-run` — reports cleanup candidates
-    (inactive sessions + logs/caches) with reclaimable bytes; no
-    execution (Phase 6). `clean` without `--dry-run` prints a Phase 6
-    placeholder.
-
-New workspace deps: tokio (cli), agenttidy-workbuddy / claude-code /
-codex + agenttidy-infrastructure (application).

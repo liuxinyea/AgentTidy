@@ -11,9 +11,11 @@ name = "agenttidy"
 path = "src/main.rs"
 
 [dependencies]
-agenttidy-core = { workspace = true }
-agenttidy-application = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
-serde_json = { workspace = true }
+comfy-table = { workspace = true }
+agenttidy-application = { workspace = true }
+agenttidy-core = { workspace = true }
 tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

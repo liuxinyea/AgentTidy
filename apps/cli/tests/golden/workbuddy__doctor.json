@@ -1,0 +1,41 @@
+{
+  "command": "doctor",
+  "data": [
+    {
+      "capabilities": {
+        "projects": "read-only",
+        "sessions": "read-only"
+      },
+      "inspection": {
+        "agent_running": "<AGENT_RUNNING>",
+        "journal_modes": {},
+        "problems": {
+          "workbuddy-db-unavailable": {
+            "message": "database not found: <TEST_HOME>/.workbuddy/workbuddy.db",
+            "severity": "warning"
+          }
+        },
+        "readable_roots": {
+          "<TEST_HOME>/.workbuddy": true,
+          "<TEST_HOME>/WorkBuddy": true
+        },
+        "schema_versions": {},
+        "unknown_structures": [],
+        "version": null
+      },
+      "installation": {
+        "data_roots": [
+          "<TEST_HOME>/.workbuddy",
+          "<TEST_HOME>/WorkBuddy"
+        ],
+        "id": "workbuddy:default",
+        "platform": "<PLATFORM>",
+        "provider": "workbuddy",
+        "status": "available",
+        "version": null
+      }
+    }
+  ],
+  "mode": "read-only",
+  "schema_version": "agenttidy.cli.v1"
+}

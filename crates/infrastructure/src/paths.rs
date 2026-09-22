@@ -29,6 +29,24 @@ use std::ffi::OsStr;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+/// Resolve the user's home directory via `HOME` (macOS / Linux) or
+/// `USERPROFILE` (Windows). Returns `None` when neither is set so
+/// callers can fail closed.
+///
+/// Consolidates the lookup that previously lived inline in three
+/// provider crates and in the audit-log writer — keeping platform
+/// branching in one place is red line #11.
+pub fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE").map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
 /// Canonicalize for safety-critical use (§16.1 "all paths canonicalize
 /// before execution").
 ///
@@ -348,6 +366,19 @@ mod tests {
             strip_verbatim(Path::new(r"C:\plain")).as_ref(),
             Path::new(r"C:\plain")
         );
+    }
+
+    #[test]
+    fn home_dir_resolves_when_env_var_set() {
+        // The path returned should be non-empty when HOME/USERPROFILE is
+        // set in the test runner; on a missing env var (some sandboxed
+        // CI runners), home_dir() correctly returns None.
+        match home_dir() {
+            Some(path) => assert!(!path.as_os_str().is_empty()),
+            None => {
+                eprintln!("home_dir returned None — HOME/USERPROFILE unset");
+            }
+        }
     }
 
     #[test]

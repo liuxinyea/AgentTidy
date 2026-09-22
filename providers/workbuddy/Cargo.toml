@@ -7,16 +7,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-agenttidy-core = { workspace = true }
 agenttidy-provider-api = { workspace = true }
+agenttidy-core = { workspace = true }
 agenttidy-infrastructure = { workspace = true }
 anyhow = { workspace = true }
-thiserror = { workspace = true }
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-rusqlite = { workspace = true }
-async-trait = { workspace = true }
-dirs = "5"
-
-[dev-dependencies]
-tokio = { workspace = true }

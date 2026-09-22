@@ -16,6 +16,7 @@
 //! - §16.2 process signal — [`processes`]
 //! - §3.4 trash-first disposal — [`trash`]
 
+pub mod audit_log;
 pub mod disk_usage;
 pub mod fs_probe;
 pub mod jsonl;
@@ -23,3 +24,4 @@ pub mod paths;
 pub mod processes;
 pub mod sqlite;
 pub mod trash;
+pub mod workspace_safety;

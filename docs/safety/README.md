@@ -1,8 +1,16 @@
 # Safety Notes
 
-Placeholder directory for safety documentation: path security rules,
-active-data protection, operation logging and recovery semantics
-(design doc §16).
+Path security rules, active-data protection, operation logging and recovery
+semantics (design doc §16). The general cleanup execution contract — risk
+vocabulary, revalidation triggers, two confirmations, audit log — lives in
+[`workspace-cleanup.md`](./workspace-cleanup.md) and applies to every
+cleanup-capable resource type.
 
-Each cleanup-capable resource type must be documented here before its
-cleanup is enabled.
+Each cleanup-capable resource type must get its own document here before
+its cleanup is enabled. Current status:
+
+| Resource type | Status |
+| --- | --- |
+| Default workspaces (`file-tree`) | Documented; **not enabled** (Phase 6 framework only, enablement deferred — see the doc's status note). |
+| Session transcripts (`file-set`) | Not documented, not enabled (Phase 7 candidate). |
+| Provider DB records (`provider-operation`) | Not documented, not enabled (Phase 7 candidate). |

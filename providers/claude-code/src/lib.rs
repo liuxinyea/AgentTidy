@@ -8,9 +8,9 @@
 
 use agenttidy_core::{
     AgentCapabilities, AgentInstallation, AgentSnapshot, CapabilityStatus, CapabilityTopic,
-    InstallationStatus, ManagedBy, Ownership, Platform, ProjectRef, ProviderId, Resource,
-    ResourceId, ResourceKind, ResourceLocator, ResourceRef, ScanOptions, ScanProblem, Session,
-    SessionId, SessionLifecycle, SizeConfidence, SizeInfo,
+    CleanupPrecondition, CleanupUnit, InstallationStatus, ManagedBy, Ownership, Platform,
+    ProjectRef, ProviderId, Resource, ResourceId, ResourceKind, ResourceLocator, ResourceRef,
+    ScanOptions, ScanProblem, Session, SessionId, SessionLifecycle, SizeConfidence, SizeInfo,
 };
 use agenttidy_infrastructure::disk_usage::UsageAccumulator;
 use agenttidy_infrastructure::fs_probe::{walk_tree, EntryKind, WalkProblem};
@@ -508,6 +508,28 @@ impl AgentProviderAdapter for ClaudeCodeAdapter {
             problems,
             completed_at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64,
         })
+    }
+
+    /// Phase 6: no cleanup units yet. Claude Code transcripts + sidecar
+    /// dirs stay report-only until the Phase 7 provider beta wires the
+    /// `FileSet` unit shape (`*.jsonl` + same-named side directory as one
+    /// atomic unit) with its safety doc. The Windows Desktop VM-mirror
+    /// installation stays out of scope entirely (`Start.md` §2.3).
+    async fn build_cleanup_units(
+        &self,
+        snapshot: &AgentSnapshot,
+    ) -> anyhow::Result<Vec<CleanupUnit>> {
+        let _ = snapshot;
+        Ok(Vec::new())
+    }
+
+    /// Phase 6: no units, no provider-specific preconditions.
+    async fn validate_cleanup_unit(
+        &self,
+        unit: &CleanupUnit,
+    ) -> anyhow::Result<Vec<CleanupPrecondition>> {
+        let _ = unit;
+        Ok(Vec::new())
     }
 }
 

@@ -14,7 +14,8 @@
 
 use agenttidy_core::snapshot::ScanProblem;
 use agenttidy_core::{
-    AgentCapabilities, AgentInstallation, AgentSnapshot, ProviderId, ScanOptions,
+    AgentCapabilities, AgentInstallation, AgentSnapshot, CleanupPrecondition, CleanupUnit,
+    ProviderId, ScanOptions,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -62,6 +63,13 @@ pub struct ProviderInspection {
 /// `async_trait` (boxed `Send` futures) keeps the trait dyn-compatible, so
 /// the application-layer registry can hold `Box<dyn AgentProviderAdapter>`
 /// across threads (Tauri commands run on a multithreaded runtime).
+///
+/// Phase 6 added two `cleanup_*` methods. Default impls return an empty
+/// vec — providers that opt into cleanup (Phase 7's first provider
+/// beta, per `Start.md` §19) override them. The application policy
+/// derives risk on the units the provider emits; cleanup-unit method
+/// bodies must stay provider-neutral (no per-provider risk logic, no
+/// side effects, no in-place mutation of agent state — red line #3).
 #[async_trait::async_trait]
 pub trait AgentProviderAdapter: Send + Sync {
     /// Which agent product this adapter implements.
@@ -101,6 +109,35 @@ pub trait AgentProviderAdapter: Send + Sync {
         installation: &AgentInstallation,
         options: &ScanOptions,
     ) -> anyhow::Result<AgentSnapshot>;
+
+    /// Construct atomic cleanup units from a scan snapshot
+    /// (`Start.md` §9.5 + §11). The default returns empty so providers
+    /// that have not opted into cleanup keep their old surface; Phase 7
+    /// enables the first provider's override. Only `Exclusive` resources
+    /// can form a unit — Shared/Unknown inputs must be filtered here,
+    /// not at policy time.
+    async fn build_cleanup_units(
+        &self,
+        snapshot: &AgentSnapshot,
+    ) -> anyhow::Result<Vec<CleanupUnit>> {
+        // Phase 6 default: no provider is cleanup-enabled yet.
+        let _ = snapshot;
+        Ok(Vec::new())
+    }
+
+    /// Per-unit preconditions the policy / revalidator should check
+    /// before executing (e.g. "no symlink outside root", "writer lock
+    /// absent", "schema unchanged"). Mirrors §12.2 invalidation
+    /// triggers in typed form. Default returns empty; first provider to
+    /// override also wires `build_cleanup_units`.
+    async fn validate_cleanup_unit(
+        &self,
+        unit: &CleanupUnit,
+    ) -> anyhow::Result<Vec<CleanupPrecondition>> {
+        // Phase 6 default: no provider-specific preconditions.
+        let _ = unit;
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]

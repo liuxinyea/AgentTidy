@@ -1,9 +1,34 @@
 # Default Workspace Cleanup Safety Rules
 
-This document defines the future cleanup gate for default agent workspaces.
-It does **not** enable cleanup in the current read-only release. The rules
-implement the safety principles in `Start.md` §16 and must be enforced by the
-Phase 6 planner and executor before a workspace can enter a CleanupPlan.
+This document defines the cleanup gate for default agent workspaces and the
+general execution contract shared by every cleanup-capable resource type. The
+rules implement the safety principles in `Start.md` §16 and are enforced by
+the Phase 6 planner (`crates/application`) and executor.
+
+**Current status (Phase 6):** the framework, policy, revalidation protocol,
+two-confirmation flow, audit log, and GUI Review surface are live — but no
+provider emits cleanup units yet, so nothing on disk is cleanable. Workspace
+cleanup specifically stays deferred: `Start.md` §2.3 keeps files already in
+the user's project out of default cleanup, and `~/Documents/Codex/` /
+`~/WorkBuddy/` are user-mixed roots. Any future enablement of a new resource
+type requires a safety doc here first (see `docs/safety/README.md`).
+
+## Risk vocabulary
+
+Every plan item carries one of the three `Start.md` §7 risk levels — the
+former binary eligible/blocked model is replaced:
+
+| Risk | GUI badge (English) | Reference (Chinese) | Default selection (§6.3) |
+| --- | --- | --- | --- |
+| `low-risk` | Recommended (green) | 建议清理 | Checked, user may uncheck |
+| `review-required` | Caution (amber) | 谨慎清理 | Unchecked |
+| `blocked` | Off-limits (gray) | 很干净 | Non-selectable |
+
+`low-risk` requires every §7.1 condition simultaneously: known resource
+kind, known provider version and schema, an atomic cleanup unit, exclusive
+ownership, no unknown dependencies, a non-active session, recoverable via
+OS Trash, and re-checkable preconditions. Archive alone (red line #5) or
+age alone never promotes a unit to `low-risk`.
 
 ## Eligibility
 
@@ -22,25 +47,102 @@ at plan time and revalidated immediately before execution:
 
 Any missing, stale, shared, unknown, or conflicting evidence blocks cleanup.
 
+## Revalidation triggers
+
+Between the two confirmations and again inside the executor, every selected
+unit is revalidated (`Start.md` §12.2). A unit is `skipped` — never executed —
+when **any** of these changed since plan time:
+
+1. **Path exists** — the recorded path no longer resolves.
+2. **Path unchanged** — `safe_canonicalize` resolves elsewhere (link swap,
+   Windows verbatim/UNC re-spelling).
+3. **Identity unchanged** — file identity (Windows volume + file index,
+   Unix dev + inode) differs: the original was replaced.
+4. **Size unchanged** — logical size differs.
+5. **Mtime unchanged** — modification time moved more than tolerance.
+6. **No agent running** — a fresh `inspect()` reports the agent process
+   present (§16.2: concurrent execution is unsafe).
+7. **Session inactive** — the owning session returned to `Active`, or its
+   lifecycle is `Unknown`.
+8. **Session still exclusive** — the workspace no longer maps 1:1 to
+   exactly one session cwd (§12.2 "dependencies changed / no longer
+   exclusive").
+9. **Schema unchanged** — provider schema versions / journal modes differ
+   from the plan-time inspection.
+10. **Writer lock absent** — e.g. Codex `thread-writer-locks/` is no longer
+    empty.
+11. **Filesystem eligible** — the four workspace-safety booleans
+    (`filesystem_eligible`, `has_git_marker`, `has_unsafe_entry`,
+    `has_unreadable_entry`) changed.
+12. **No symlink outside root** — a link inside the unit now points outside
+    it (§16.1 link boundary).
+
+Each trigger is a typed `CleanupPreconditionKind`; the executor reports
+*which one* fired so the GUI can show a per-row "changed — rescan" badge.
+The plan also expires after its `expires_at` TTL — an expired plan requires
+a fresh scan, not a re-click (§12.2: 计划已过期，请重新扫描).
+
 ## User Confirmation
 
-Workspace cleanup requires two separate affirmative confirmations:
+Cleanup requires two separate affirmative confirmations:
 
-1. The user reviews a non-mutating CleanupPlan that names the workspace,
-   owning session, measured size, and every failed-or-passed safety gate.
+1. The user reviews a non-mutating CleanupPlan that names each unit, owning
+   session, measured size, risk level, and every failed-or-passed safety gate
+   ("Review Selected" in the GUI, which triggers revalidation).
 2. Immediately before execution, after revalidation, the user confirms the
-   same item again. A changed candidate invalidates the first confirmation and
-   requires a new plan review.
+   same selection again. A changed candidate invalidates the first
+   confirmation and requires a new plan review. The GUI additionally
+   requires typing `CONFIRM` — no keyboard shortcut or default focus
+   reaches the execute button.
 
 Both confirmations must prominently state that the directory can contain
 agent-generated files the user may still need, that recovery relies on the OS
 Trash, and that AgentTidy cannot guarantee semantic recovery of external
 references.
 
+The executor enforces the confirmations technically via a plan
+`fingerprint` (SHA-256 over the plan tuple): `cleanup_execute` refuses any
+plan whose fingerprint does not match what the backend re-derives.
+
 ## Execution Boundary
 
+Two action types exist and must never be confused (`Start.md` §3.4, §12.4):
+
+- `action: trash` — file-shaped units move to the OS Trash (Windows Recycle
+  Bin / macOS Finder) as **one whole**; AgentTidy never partially deletes
+  contents. Database rows are never labeled "Move to Trash".
+- `action: provider-operation` — a provider-coordinated operation (backup
+  then vacuum, etc.). Not constructed in Phase 6; requires its own safety
+  doc before enablement.
+
+Outcomes are recorded per item (`Start.md` §12.3): `removed` / `skipped` /
+`failed`. A path already gone at execute time counts as `skipped`, never as
+a new success (idempotent reporting). Partial failure never corrupts the
+report — each remaining unit still executes and records independently. No
+cross-database global transaction is promised in v0.1.
+
+**Operation guard (§12.1 "acquire operation guard")** is deferred to
+Phase 7: Phase 6 executes single-user, single-call flows where concurrent
+cleanup of the same plan has no UI path. Reviewers should treat
+concurrent-execute hardening as an open Phase 7 threat-model item.
+
+## Audit log
+
+Every executed item appends one line to the per-user audit log
+(`Start.md` §16.3):
+
+- Path: `$HOME/.agenttidy/operations.jsonl` (`%USERPROFILE%\.agenttidy\`
+  on Windows), append-only, `fsync`ed per line, no rotation in v0.1
+  (user-managed truncation).
+- Fields: `schema_version` (`agenttidy.audit.v1`), `platform`,
+  `timestamp_ms`, `plan_id`, `unit_id`, `provider`, `original_locator`
+  (tagged: file / dir / file-set / db-row), `action`, `outcome`,
+  `reclaimed_bytes`, `reason`.
+- Hard constraint: the log never contains transcript bodies, credentials,
+  tokens, or file contents — only paths and metadata. It must be safe to
+  ship in a diagnostics bundle without redaction.
+
 Eligible workspaces are moved to the OS Trash as one directory; AgentTidy
-never partially deletes their contents. The executor records the result
-without transcript bodies, credentials, or file contents. User-selected
-projects, repositories, shared workspaces, and all non-default locations stay
+never partially deletes their contents. User-selected projects,
+repositories, shared workspaces, and all non-default locations stay
 Blocked.

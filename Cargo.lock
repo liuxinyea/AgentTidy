@@ -15,11 +15,14 @@ dependencies = [
  "agenttidy-claude-code",
  "agenttidy-codex",
  "agenttidy-core",
+ "agenttidy-infrastructure",
  "agenttidy-provider-api",
  "agenttidy-workbuddy",
  "anyhow",
  "serde",
  "serde_json",
+ "sha2",
+ "tokio",
 ]
 
 [[package]]
@@ -74,6 +77,8 @@ dependencies = [
 name = "agenttidy-desktop"
 version = "0.1.0"
 dependencies = [
+ "agenttidy-application",
+ "agenttidy-core",
  "serde",
  "serde_json",
  "tauri",

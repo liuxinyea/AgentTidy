@@ -8,9 +8,9 @@
 
 use agenttidy_core::{
     AgentCapabilities, AgentInstallation, AgentSnapshot, CapabilityStatus, CapabilityTopic,
-    InstallationStatus, ManagedBy, Ownership, Platform, ProjectRef, ProviderId, Resource,
-    ResourceId, ResourceKind, ResourceLocator, ResourceRef, ScanOptions, ScanProblem, Session,
-    SessionId, SessionLifecycle, SizeConfidence, SizeInfo,
+    CleanupPrecondition, CleanupUnit, InstallationStatus, ManagedBy, Ownership, Platform,
+    ProjectRef, ProviderId, Resource, ResourceId, ResourceKind, ResourceLocator, ResourceRef,
+    ScanOptions, ScanProblem, Session, SessionId, SessionLifecycle, SizeConfidence, SizeInfo,
 };
 use agenttidy_infrastructure::disk_usage::UsageAccumulator;
 use agenttidy_infrastructure::fs_probe::{walk_tree, EntryKind, WalkProblem};
@@ -639,6 +639,34 @@ impl AgentProviderAdapter for CodexAdapter {
             problems,
             completed_at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64,
         })
+    }
+
+    /// Phase 6: deliberately returns no cleanup units.
+    ///
+    /// Two independent gates keep Codex cleanup out of v0.1-alpha:
+    /// - `~/Documents/Codex/` is a user-mixed default workspace
+    ///   (`Start.md` §2.3 — files already inside the user's project are
+    ///   never default-cleanup candidates), and
+    /// - trashing session rollout JSONLs would orphan the authoritative
+    ///   `state_5.sqlite.threads` index rows, which needs a coordinated
+    ///   `ProviderOperation` (Phase 7, per `Start.md` §19).
+    async fn build_cleanup_units(
+        &self,
+        snapshot: &AgentSnapshot,
+    ) -> anyhow::Result<Vec<CleanupUnit>> {
+        let _ = snapshot;
+        Ok(Vec::new())
+    }
+
+    /// Phase 6: no units are built, so no provider-specific preconditions
+    /// apply yet. Phase 7 wires the §12.2 triggers (writer-lock absent,
+    /// thread-index schema unchanged) alongside `build_cleanup_units`.
+    async fn validate_cleanup_unit(
+        &self,
+        unit: &CleanupUnit,
+    ) -> anyhow::Result<Vec<CleanupPrecondition>> {
+        let _ = unit;
+        Ok(Vec::new())
     }
 }
 

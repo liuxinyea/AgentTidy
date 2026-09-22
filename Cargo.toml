@@ -36,6 +36,10 @@ anyhow = "1"
 # async-trait: makes AgentProviderAdapter dyn-compatible (boxed futures),
 # so the application-layer registry can hold `Box<dyn AgentProviderAdapter>`.
 async-trait = "0.1"
+# sha2: SHA-256 over the plan fingerprint tuple (Start.md §12.1 last
+# step) so the executor can reject a stale plan the user "confirms"
+# twice. Tiny dep, no native deps.
+sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 # comfy-table renders adaptive Unicode tables and ANSI status colors for the

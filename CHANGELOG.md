@@ -35,6 +35,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Phase 4 read-only application/CLI path: static registration of the three
   providers and functional `doctor`, `scan`, and `sessions` commands. Cleanup
   is intentionally a future GUI-only workflow, not a CLI subcommand.
+- End-to-end CLI golden baselines: 12 committed snapshots under
+  `apps/cli/tests/golden/` (3 providers × 3 commands + 3 empty-home
+  regressions) lock the `agenttidy.cli.v1` envelope against the existing
+  sanitized fixtures. Absolute paths, completion timestamps, the
+  agent-running flag, session lifecycle state and the `platform` label are
+  normalised to placeholders so a single golden set covers macOS and
+  Windows CI runners; the locked contract includes `thread-index-unavailable`
+  on Codex scans, `workbuddy-db-unavailable` on WorkBuddy inspections and
+  the four workspace-safety booleans on default-workspace resources.
+- Phase 5 GUI read-only experience: Tauri 2 IPC bridge
+  (`apps/desktop/src-tauri/src/commands.rs`) forwarding `doctor` /
+  `scan` / `detect` to `agenttidy-application`, plus a three-view React
+  shell (Overview / Sessions / Diagnostics) per Start.md §6.1/§6.2/§6.4
+  with hand-written TS types in `apps/desktop/src/types.ts` matching the
+  Rust serde shapes. Auto-scan on mount plus a manual Refresh button;
+  empty installs route to a dedicated `Empty` panel. Cleanup actions
+  (§6.3 Review & Tidy) remain a Phase 6 deliverable.
+- Phase 6 cleanup model (framework-only): typed domain vocabulary in
+  `crates/core/src/cleanup.rs` (three-level RiskLevel, CleanupUnit /
+  CleanupPlan / CleanupItem, §12.2 revalidation precondition kinds,
+  tagged CleanupLocator + §16.3 CleanupEvent); `AgentProviderAdapter`
+  gained `build_cleanup_units` / `validate_cleanup_unit` (default: empty
+  — no provider is cleanup-enabled until Phase 7); Application API
+  gained the pure `cleanup_policy_evaluate`, `cleanup_plan_from_snapshots`,
+  `cleanup_revalidate`, and fingerprint-guarded `cleanup_execute`; an
+  append-only fsynced audit log at `$HOME/.agenttidy/operations.jsonl`;
+  `agenttidy.gui.v1` IPC envelopes over three Tauri commands
+  (`cleanup_preview` / `cleanup_revalidate` / `cleanup_execute`); and the
+  GUI's Tidy tab implementing the two-confirmation flow with the Mac
+  cleaner review layout (Recommended / Caution / Off-limits badges,
+  per-provider groups, typed CONFIRM modal). `docs/safety/workspace-cleanup.md`
+  now enumerates the §12.2 revalidation triggers, the audit-log schema,
+  and the Trash vs ProviderOperation boundary. The CLI stays read-only —
+  no cleanup subcommand.
+- GUI bilingual (zh/en) internationalization: a hand-rolled i18n layer
+  (`apps/desktop/src/i18n/`) with `en.ts` as source of truth and `zh.ts`
+  typed as `Record<TranslationKey, string>` — missing/extra keys fail
+  `tsc -b`, so `pnpm build:desktop` is the catalog-completeness gate.
+  First launch detects `navigator.language`, the header carries an
+  EN / 中文 toggle persisted in `localStorage`, and `<html lang>` follows
+  the active locale. Static UI, frontend-mapped enum labels (status /
+  capability / lifecycle / risk / confidence / severity / outcome) and
+  the Phase 7 banner are fully localized; backend `ScanProblem` messages
+  map to Chinese by stable code/path-suffix with English fallback, while
+  cleanup reasons and anyhow errors stay English until Phase 7. Shared
+  `format.ts` consolidates the previously copy-pasted `humanBytes` and
+  locale-formats the three timestamp columns.
 - Documented the future default-workspace cleanup gate: exact exclusive
   session ownership, no Git repository or shared references, OS Trash only,
   revalidation, risk disclosure, and two independent user confirmations.

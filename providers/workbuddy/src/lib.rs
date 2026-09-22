@@ -7,9 +7,9 @@
 
 use agenttidy_core::{
     AgentCapabilities, AgentInstallation, AgentSnapshot, CapabilityStatus, CapabilityTopic,
-    InstallationStatus, ManagedBy, Ownership, Platform, ProjectRef, ProviderId, Resource,
-    ResourceId, ResourceKind, ResourceLocator, ResourceRef, ScanOptions, ScanProblem, Session,
-    SessionId, SessionLifecycle, SizeConfidence, SizeInfo,
+    CleanupPrecondition, CleanupUnit, InstallationStatus, ManagedBy, Ownership, Platform,
+    ProjectRef, ProviderId, Resource, ResourceId, ResourceKind, ResourceLocator, ResourceRef,
+    ScanOptions, ScanProblem, Session, SessionId, SessionLifecycle, SizeConfidence, SizeInfo,
 };
 use agenttidy_infrastructure::disk_usage::UsageAccumulator;
 use agenttidy_infrastructure::fs_probe::{walk_tree, EntryKind, WalkProblem};
@@ -450,6 +450,28 @@ impl AgentProviderAdapter for WorkBuddyAdapter {
             problems,
             completed_at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64,
         })
+    }
+
+    /// Phase 6: no cleanup units. WorkBuddy's `sessions` table contract
+    /// is still unfrozen (see `docs/CHANGELOG.md` Phase 3 notes), its
+    /// session lifecycle stays `Unknown`, and automations may reference
+    /// arbitrary cwds — all of which force Blocked until a Phase 7
+    /// safety doc lands for each enabled resource type.
+    async fn build_cleanup_units(
+        &self,
+        snapshot: &AgentSnapshot,
+    ) -> anyhow::Result<Vec<CleanupUnit>> {
+        let _ = snapshot;
+        Ok(Vec::new())
+    }
+
+    /// Phase 6: no units, no provider-specific preconditions.
+    async fn validate_cleanup_unit(
+        &self,
+        unit: &CleanupUnit,
+    ) -> anyhow::Result<Vec<CleanupPrecondition>> {
+        let _ = unit;
+        Ok(Vec::new())
     }
 }
 

@@ -13,9 +13,9 @@
 | Phase 1：Read-only Core | 已完成 | 只读领域模型、能力模型、快照和静态 Provider Registry 已实现。 |
 | Phase 2：Infrastructure | 已完成 | 安全文件系统、只读 SQLite、JSONL、空间统计、进程信号与回收站封装已实现。 |
 | Phase 3：三个 Read-only Provider | 已完成 | Codex、Claude Code（CLI/Desktop）和 WorkBuddy 均已具备安全降级的只读扫描。 |
-| Phase 4：CLI Validation | 已完成（只读初版） | CLI 已提供版本化 JSON 契约、文本诊断与真实扫描；清理及候选预览保留给未来 GUI。 |
-| Phase 5：GUI Read-only Experience | 未开始 | 待 Application API 和 CLI 验证路径稳定后接入。 |
-| Phase 6：Cleanup Model | 未开始 | 继续保持只读；尚未开放清理模型或执行能力。 |
+| Phase 4：CLI Validation | 已完成（只读初版） | CLI 已提供版本化 JSON 契约、文本诊断、真实扫描与 12 个端到端 golden；清理与候选预览保留给 Phase 6/7。 |
+| Phase 5：GUI Read-only Experience | 已完成（只读初版） | Tauri 2 IPC + React 三视图（Overview / Sessions / Diagnostics）已接入 Application API；清理与候选预览保留给 Phase 6/7。 |
+| Phase 6：Cleanup Model | 已完成（framework-only 初版） | 清理领域模型、策略、重新验证、审计日志、IPC 与 GUI Review 视图已落地；三个 provider 均未产出 Cleanup Unit，真实清理归 Phase 7。 |
 | Phase 7：首个 Provider Cleanup Beta | 未开始 | 依赖 Phase 6 的安全模型与跨平台验证。 |
 | Phase 8：逐 Provider 扩展 | 未开始 | 按 Provider 分别通过安全门槛后推进。 |
 
@@ -43,6 +43,72 @@
 - 实现逐行 JSONL 解析、只读 SQLite（含 WAL / 临时副本回退）、进程存在性
   信号和系统回收站封装。
 - 平台特定实现限定在 infrastructure 层，符合架构边界。
+
+### Phase 5：GUI Read-only Experience
+
+- Tauri 2 IPC 桥接：`apps/desktop/src-tauri/src/commands.rs` 注册 `doctor`、
+  `scan`、`detect` 三个命令，转发到 `agenttidy-application`，薄壳层无业务逻辑。
+  `Result<T, String>` 作为 IPC 错误形态；`capabilities/default.json` 是最小
+  占位（应用命令经 `tauri::generate_handler!` 自动放行）。
+- React 三视图（Start.md §6.1 / §6.2 / §6.4）：Overview 卡片展示每个安装的
+  capability、sessions / resources / total size / workspace footprint 与问题计数；
+  Sessions 表格列出所有可识别 Session 及其 lifecycle / cwd / 大小；
+  Diagnostics 折叠面板展示 inspection.problems / readable_roots /
+  schema_versions / journal_modes / data_roots。
+- TS 类型在 `apps/desktop/src/types.ts` 手写对齐 Rust serde shape；`pnpm build:desktop`
+  的 `tsc -b` 步骤拦截 IPC 字段重命名与类型不匹配。自动 mount 扫描 + 手动 Refresh
+  按钮；空安装路由到独立 `Empty` 面板，与 CLI 的空 envelope 契约对齐。
+- §6.3 Review & Tidy 在 Phase 6 交付（见下方 Phase 6 里程碑）；Phase 5 收官时
+  GUI 仍不暴露执行入口。
+
+### Phase 6：Cleanup Model（framework-only 初版）
+
+- 领域模型 `crates/core/src/cleanup.rs`：三级 `RiskLevel`（§7）、`CleanupUnit`
+  / `CleanupPlan` / `CleanupItem`（§9.5 / §12）、12 个 §12.2 重新验证
+  precondition kind、tagged `CleanupLocator` 与 §16.3 `CleanupEvent`
+  （含 `schema_version: agenttidy.audit.v1` + `platform`）。
+- Provider 契约：`AgentProviderAdapter` 新增 `build_cleanup_units` /
+  `validate_cleanup_unit`，默认实现返回空。**三个 provider 的 override 均显式
+  返回空** —— Codex workspace 是 user-mixed（§2.3）、session JSONL 会孤儿化
+  `state_5.sqlite.threads`；Claude Code FileSet 与 WorkBuddy（`sessions` 表契约
+  未冻结）均排 Phase 7，各自在 doc 注释中说明门槛。
+- Application 层：纯函数 `cleanup_policy_evaluate(unit, ctx)`（§11，注入
+  `now_ms` 保证确定性）、`cleanup_plan_from_snapshots`（SHA-256 plan
+  fingerprint + 5 分钟 TTL）、`cleanup_revalidate`（§12.2 逐项触发器 + 报告
+  哪一条失效）、`cleanup_execute`（fingerprint 不匹配即拒绝；幂等
+  AlreadyGone ⇒ Skipped；每项写审计日志）。旧
+  `workspace_cleanup_candidates_from_snapshots` 保留为迁移期投影，既有 4 个
+  测试不回归；新增 10 个测试覆盖三个风险等级、空 plan、fingerprint 拒绝与
+  六类重新验证触发器。
+- Infrastructure：`paths::home_dir()` 共享 helper；`TrashOutcome`
+  （Removed / AlreadyGone / PlatformError）替换二元返回；`audit_log` 模块
+  （`$HOME/.agenttidy/operations.jsonl`，append-only + fsync，JSONL roundtrip
+  测试）。
+- IPC + GUI：`agenttidy.gui.v1` envelope 的三个 Tauri 命令
+  （`cleanup_preview` / `cleanup_revalidate` / `cleanup_execute`）对应两步确认
+  流程的三个阶段；前端 `Tidy` tab 按 Mac cleaner 视觉锚点实现 hero stat、
+  按 provider 分组行、Recommended / Caution / Off-limits 徽章、stale 行
+  “changed — rescan” 标记与需键入 CONFIRM 的第二次确认 modal。
+  空 plan 显示 Phase 7 rollout banner。
+- `docs/safety/workspace-cleanup.md` 与 §11/§12 对齐：三级风险词汇表、
+  12 条重新验证触发器、审计日志 schema、`Trash` vs `ProviderOperation`
+  边界（DB 行永不标签为 Move to Trash）、operation guard 推迟至 Phase 7
+  的 threat-model 备注。`docs/safety/README.md` 增加资源类型状态表。
+- CLI 保持只读：无 `clean` 子命令；12 个 CLI golden 不变。
+
+### GUI 双语（zh/en）
+
+- 手写轻量 i18n（`apps/desktop/src/i18n/`）：`en.ts` 为 source of truth，
+  `zh.ts` 以 `Record<TranslationKey, string>` 约束——缺 key / 多 key 都会让
+  `tsc -b` 失败，`pnpm build:desktop` 即完整性门禁（双向均已自证）。首次启动
+  按 `navigator.language` 检测，header 提供 EN / 中文 切换并持久化到
+  `localStorage`，同步 `<html lang>`。
+- 翻译范围三层：前端静态文案与枚举标签全译（status / capability /
+  lifecycle / risk / confidence / severity / outcome）；后端 `ScanProblem`
+  按稳定 code / 路径后缀映射到中文、未知 code 回退英文原文；cleanup
+  reasons 与 anyhow 错误保持英文（Phase 7 随安全文档一起映射）。
+  `format.ts` 收编四处重复的 `humanBytes`，三处时间戳改为按语言本地化格式。
+  CLI 输出（`agenttidy.cli.v1` 自动化契约）永远英文。
 
 ## 当前工作与已知问题
 
@@ -84,27 +150,43 @@
 - Application 层以无副作用的纯函数应用工作空间候选门槛，并以单元测试锁定：精确
   单 Session + 文件系统安全事实才能预览为 eligible；WorkBuddy 在自动化引用契约
   未验证前始终 blocked。该能力只供未来 GUI 的候选选择与确认流程使用，不暴露给 CLI。
-- 已在开发机验证真实扫描结果。后续可按真实 provider fixtures 增加端到端 CLI
-  golden 基线，但不阻塞这版只读 CLI 的交付。
+- 已在开发机验证真实扫描结果，并按真实 provider fixtures 增加端到端 CLI
+  golden 基线：`apps/cli/tests/golden/` 下的 12 个提交快照（3 provider ×
+  3 command + 3 empty-home 回归）锁住 `agenttidy.cli.v1` envelope 与降级
+  行为（Codex 缺 SQLite、WorkBuddy 缺 db 时各自的警告路径与 workspace
+  resource 字段）。绝对路径、完成时间戳、`agent_running`、`lifecycle.state`
+  与 `platform` 字段以占位符归一化，单套金色可同时用于 macOS 与 Windows
+  CI。新增 provider 或 schema 字段变更会立即破坏金色，需要同步更新。
 - 默认工作空间与常见 AppData/缓存路径的只读统计将作为本阶段后续工作；它们与
   Session 占用分开显示，默认仅报告。
 - Codex `Documents/Codex` 与 WorkBuddy `WorkBuddy` 默认工作空间已纳入扫描快照和
   CLI 汇总，作为 `Workspace / User / report-only` 资源独立统计；不会归入 Session
   或可回收空间。
 
-### Phase 6：Workspace Cleanup Policy
+### Phase 7：首个 Provider Cleanup Beta（原 Phase 6 清理启用项）
 
-- 已确定默认工作空间的未来清理门槛：精确单会话归属、无 Git、无其他 Session /
-  自动化引用、无未知或变化项，并要求“计划预览确认 + 执行前确认”两次独立确认。
-  详细安全规则见 `docs/safety/workspace-cleanup.md`；当前不开放清理。
+- 框架已就绪（Phase 6），启用真实清理需按 Provider 分别跨过门槛：
+  - 每个启用的资源类型先在 `docs/safety/` 起独立文档；
+  - Codex：session JSONL `FileSet` 与 `state_5.sqlite.threads` 行的协调
+    `ProviderOperation`；workspace 仍因 §2.3 保持 Blocked；
+  - Claude Code：transcript + 同名 side 目录的 `FileSet` 原子单元；
+  - WorkBuddy：先冻结 `sessions` 表契约再谈生命周期与单元；
+  - 启用 provider override `build_cleanup_units` / `validate_cleanup_unit`，
+    策略随之从 ReviewRequired 提升到 LowRisk 的 per-kind 规则；
+  - Operation guard（§12.1 跨进程锁）与多路径 `move_paths_to_trash`；
+  - 视觉沿用已落地的 §6.3 Review & Tidy + 顶部
+    “共发现 N.N GB / 已选 X.XX GB” 与 “立即清理”（见 memory 锚点），
+    按 §6.3 默认选中规则：`low-risk` 默认勾选、`review-required` 默认不选、
+    `blocked` 不可选。
 
 ### 验证前置问题
 
 - macOS 无 GUI / Finder 服务时，回收站功能会以 `TrashError::Platform` 失败；
   单元测试会明确跳过原生回收站断言，生产调用仍保持 fail-closed。其余 Rust
   测试与 Clippy 在当前环境通过。
-- 前端构建在当前受限会话未返回有效退出状态，尚需在标准 CI 或本地桌面环境
-  确认 `pnpm build:desktop` 的结果。
+- 前端构建在受限会话下的不确定状态已解决：`pnpm build:desktop`（`tsc -b`
+  与 `vite build`）与 `cargo build -p agenttidy-desktop` 在当前会话下均能
+  干净通过；前端 build 不再是 Phase 5 验证的阻塞项。
 
 ## 维护约定
 

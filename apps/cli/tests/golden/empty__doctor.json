@@ -1,0 +1,6 @@
+{
+  "command": "doctor",
+  "data": [],
+  "mode": "read-only",
+  "schema_version": "agenttidy.cli.v1"
+}

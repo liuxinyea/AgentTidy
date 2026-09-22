@@ -1,0 +1,126 @@
+{
+  "command": "scan",
+  "data": [
+    {
+      "completed_at": 0,
+      "installation": {
+        "data_roots": [
+          "<TEST_HOME>/.codex",
+          "<TEST_HOME>/Documents/Codex"
+        ],
+        "id": "codex:default",
+        "platform": "<PLATFORM>",
+        "provider": "codex",
+        "status": "available",
+        "version": null
+      },
+      "problems": {
+        "thread-index-unavailable": {
+          "message": "thread index unavailable; JSONL-only scan: database not found: <TEST_HOME>/.codex/state_5.sqlite",
+          "severity": "warning"
+        }
+      },
+      "resources": [
+        {
+          "created_at": null,
+          "dependencies": [],
+          "id": "codex:default:session:019e927e-a8f2-7e61-8a09-4e486e1215ea",
+          "installation_id": "codex:default",
+          "kind": "session",
+          "locator": {
+            "path": "<TEST_HOME>/.codex/sessions/2026/06/04/rollout-019e927e-a8f2-7e61-8a09-4e486e1215ea.jsonl",
+            "type": "file"
+          },
+          "managed_by": "agent",
+          "metadata": {},
+          "ownership": "exclusive",
+          "project": {
+            "cwd": "<cwd-slug>",
+            "display_name": null
+          },
+          "provider": "codex",
+          "session_id": "019e927e-a8f2-7e61-8a09-4e486e1215ea",
+          "size": {
+            "allocated_bytes": 4096,
+            "confidence": "exact",
+            "exclusive_bytes": 1194,
+            "logical_bytes": 1194,
+            "reclaimable_bytes": null,
+            "shared_bytes": null
+          },
+          "updated_at": null
+        },
+        {
+          "created_at": null,
+          "dependencies": [],
+          "id": "codex:default:workspace:<TEST_HOME>/Documents/Codex",
+          "installation_id": "codex:default",
+          "kind": "workspace",
+          "locator": {
+            "path": "<TEST_HOME>/Documents/Codex",
+            "type": "dir"
+          },
+          "managed_by": "user",
+          "metadata": {
+            "filesystem_eligible": true,
+            "has_git_marker": false,
+            "has_unreadable_entry": false,
+            "has_unsafe_entry": false
+          },
+          "ownership": "unknown",
+          "project": null,
+          "provider": "codex",
+          "session_id": null,
+          "size": {
+            "allocated_bytes": null,
+            "confidence": "exact",
+            "exclusive_bytes": null,
+            "logical_bytes": 0,
+            "reclaimable_bytes": null,
+            "shared_bytes": null
+          },
+          "updated_at": null
+        }
+      ],
+      "sessions": [
+        {
+          "created_at": null,
+          "id": "019e927e-a8f2-7e61-8a09-4e486e1215ea",
+          "installation_id": "codex:default",
+          "lifecycle": {
+            "state": "<LIFECYCLE>"
+          },
+          "metadata": {
+            "cli_version": "0.145.0",
+            "originator": "codex_cli",
+            "source": "cli",
+            "thread_source": "user"
+          },
+          "project": {
+            "cwd": "<cwd-slug>",
+            "display_name": null
+          },
+          "provider": "codex",
+          "resource_refs": [
+            {
+              "id": "codex:default:session:019e927e-a8f2-7e61-8a09-4e486e1215ea",
+              "kind": "session"
+            }
+          ],
+          "size": {
+            "allocated_bytes": 4096,
+            "confidence": "exact",
+            "exclusive_bytes": 1194,
+            "logical_bytes": 1194,
+            "reclaimable_bytes": null,
+            "shared_bytes": null
+          },
+          "title": null,
+          "updated_at": null
+        }
+      ]
+    }
+  ],
+  "mode": "read-only",
+  "schema_version": "agenttidy.cli.v1"
+}

@@ -1,0 +1,42 @@
+{
+  "command": "doctor",
+  "data": [
+    {
+      "capabilities": {
+        "archive": "degraded",
+        "projects": "degraded",
+        "sessions": "degraded"
+      },
+      "inspection": {
+        "agent_running": "<AGENT_RUNNING>",
+        "journal_modes": {},
+        "problems": {
+          "thread-index-missing": {
+            "message": "state_5.sqlite missing; JSONL-only scan will be degraded",
+            "severity": "warning"
+          }
+        },
+        "readable_roots": {
+          "<TEST_HOME>/.codex": true,
+          "<TEST_HOME>/Documents/Codex": true
+        },
+        "schema_versions": {},
+        "unknown_structures": [],
+        "version": null
+      },
+      "installation": {
+        "data_roots": [
+          "<TEST_HOME>/.codex",
+          "<TEST_HOME>/Documents/Codex"
+        ],
+        "id": "codex:default",
+        "platform": "<PLATFORM>",
+        "provider": "codex",
+        "status": "available",
+        "version": null
+      }
+    }
+  ],
+  "mode": "read-only",
+  "schema_version": "agenttidy.cli.v1"
+}

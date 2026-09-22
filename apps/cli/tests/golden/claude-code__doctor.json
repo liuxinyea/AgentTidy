@@ -1,0 +1,34 @@
+{
+  "command": "doctor",
+  "data": [
+    {
+      "capabilities": {
+        "projects": "read-only",
+        "sessions": "read-only"
+      },
+      "inspection": {
+        "agent_running": "<AGENT_RUNNING>",
+        "journal_modes": {},
+        "problems": {},
+        "readable_roots": {
+          "<TEST_HOME>/.claude": true
+        },
+        "schema_versions": {},
+        "unknown_structures": [],
+        "version": null
+      },
+      "installation": {
+        "data_roots": [
+          "<TEST_HOME>/.claude"
+        ],
+        "id": "claude-code:cli",
+        "platform": "<PLATFORM>",
+        "provider": "claude-code",
+        "status": "available",
+        "version": null
+      }
+    }
+  ],
+  "mode": "read-only",
+  "schema_version": "agenttidy.cli.v1"
+}

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Desktop application icon: a reproducible 1024×1024 source icon
+  (`apps/desktop/assets/app-icon.png`, drawn by
+  `apps/desktop/assets/generate_app_icon.py`) — rounded teal→emerald plate with
+  a white "tidy rows + sparkle" glyph matching the GUI's emerald accent — with
+  the full platform icon set (`icon.icns` / `icon.ico` / all PNG sizes,
+  `apps/desktop/src-tauri/icons/`) generated via `tauri icon`; the web shell
+  serves a matching favicon.
+
 - Adaptive, terminal-friendly Unicode tables for the human-facing CLI output,
   with readable byte units and status colours; `--json` remains unchanged for
   automation.
